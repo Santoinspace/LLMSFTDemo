@@ -1,0 +1,43 @@
+# =============================================================================
+# 训练流程配置
+# =============================================================================
+
+# 基础设置
+general:
+  seed: 42
+  output_dir: "outputs"
+  logging_dir: "outputs/logs"
+
+# 混合精度
+precision:
+  fp16: false
+  bf16: true
+
+# 梯度检查点（节省显存）
+memory:
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+
+# 数据处理
+data:
+  train_file: "data/processed/train.jsonl"
+  val_file: "data/processed/val.jsonl"
+  text_field: "text"
+  system_prompt: "You are an expert coding assistant. Provide accurate, well-documented code solutions with clear explanations."
+
+# WandB 日志（通过环境变量 USE_WANDB=true 启用）
+wandb:
+  project: "qwen3-qlora-finetune"
+  run_name: "qwen3-1.7b-codealpaca-qlora"
+  report_to: "wandb"
+
+# SFTTrainer 特殊配置
+sft_trainer:
+  packing: false  # 不打包样本，保持完整对话结构
+  dataset_text_field: "text"
+  max_seq_length: 1024
+
+# 断点续训
+resume:
+  resume_from_checkpoint: null  # 设置为 checkpoint 路径可续训
