@@ -21,9 +21,8 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    TrainingArguments,
 )
-from trl import SFTTrainer
+from trl import SFTConfig, SFTTrainer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -105,17 +104,18 @@ def build_lora_config(qlora_config: dict) -> LoraConfig:
 
 def build_training_arguments(
     qlora_config: dict, training_config: dict, output_dir: Path
-) -> TrainingArguments:
+) -> SFTConfig:
     """构建训练参数"""
     train_cfg = qlora_config["training"]
     save_cfg = qlora_config["save_and_logging"]
     general = training_config["general"]
     precision = training_config["precision"]
     memory = training_config["memory"]
+    sft_cfg = training_config.get("sft_trainer", {})
 
     use_wandb = os.environ.get("USE_WANDB", "false").lower() == "true"
 
-    return TrainingArguments(
+    return SFTConfig(
         output_dir=str(output_dir),
         num_train_epochs=train_cfg["num_epochs"],
         per_device_train_batch_size=train_cfg["batch_size"],
@@ -146,6 +146,9 @@ def build_training_arguments(
         report_to="wandb" if use_wandb else "none",
         remove_unused_columns=False,
         label_names=["labels"],
+        max_length=sft_cfg.get("max_seq_length", train_cfg["max_seq_length"]),
+        packing=sft_cfg.get("packing", False),
+        dataset_text_field=sft_cfg.get("dataset_text_field", "text"),
     )
 
 
@@ -261,20 +264,12 @@ def main():
     )
 
     # 初始化 SFTTrainer
-    sft_config = training_config.get("sft_trainer", {})
-    max_seq_length = sft_config.get(
-        "max_seq_length", qlora_config["training"]["max_seq_length"]
-    )
-
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
-        max_seq_length=max_seq_length,
-        packing=sft_config.get("packing", False),
-        dataset_text_field=sft_config.get("dataset_text_field", "text"),
     )
 
     # 开始训练

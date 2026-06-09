@@ -22,7 +22,7 @@ class TestQLoRAConfig:
 
         # 验证必需字段
         assert "model" in config
-        assert config["model"]["model_name"] == "Qwen/Qwen3-1.7B-Instruct"
+        assert config["model"]["model_name"] == "Qwen/Qwen3-1.7B"
 
         assert "quantization" in config
         assert config["quantization"]["load_in_4bit"] is True
