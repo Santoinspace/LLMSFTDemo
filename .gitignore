@@ -2,6 +2,7 @@
 .claude/
 qwen3-finetune/data/raw/
 qwen3-finetune/data/processed/
+outputs_*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
