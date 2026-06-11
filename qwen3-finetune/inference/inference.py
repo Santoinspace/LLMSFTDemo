@@ -140,7 +140,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_path",
         type=str,
-        default="outputs/merged_model",
+        default="outputs/outputs_codealpacas/merged_model",
         help="合并后的模型路径",
     )
     parser.add_argument(

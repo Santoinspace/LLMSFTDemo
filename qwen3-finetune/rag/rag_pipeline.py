@@ -41,31 +41,38 @@ class RAGPipeline:
 
     def __init__(
         self,
-        model_path: str = "outputs/merged_model",
+        model_path: str = "outputs/outputs_codealpacas/merged_model",
         persist_dir: str = "./chroma_db",
         collection_name: str = "documents",
         top_k: int = 5,
         load_in_4bit: bool = True,
+        retriever=None,
     ):
         """
         初始化 RAG 流程
 
         参数:
             model_path: 微调后模型路径
-            persist_dir: ChromaDB 持久化目录
-            collection_name: 向量集合名称
+            persist_dir: 检索器持久化目录（retriever=None 时使用）
+            collection_name: 集合名称（retriever=None 时使用）
             top_k: 检索返回的文档数量
             load_in_4bit: 是否 4-bit 量化加载
+            retriever: 检索器实例（BM25Store / VectorStore）。
+                       为 None 时自动创建默认 VectorStore。
         """
         self.top_k = top_k
 
-        # 加载向量存储
-        logger.info(f"加载向量存储: {persist_dir}/{collection_name}")
-        self.vector_store = VectorStore(
-            persist_directory=persist_dir,
-            collection_name=collection_name,
-        )
-        logger.info(f"向量存储文档数: {self.vector_store.count()}")
+        # 加载检索器
+        if retriever is not None:
+            self.retriever = retriever
+            logger.info(f"使用检索器: {type(retriever).__name__}")
+        else:
+            logger.info(f"加载向量存储: {persist_dir}/{collection_name}")
+            self.retriever = VectorStore(
+                persist_directory=persist_dir,
+                collection_name=collection_name,
+            )
+        logger.info(f"文档数: {self.retriever.count()}")
 
         # 加载模型
         logger.info(f"加载模型: {model_path}")
@@ -121,10 +128,10 @@ class RAGPipeline:
         contexts = []
         rag_system_prompt = system_prompt or "你是一个专业的领域知识助手。"
 
-        if use_rag and self.vector_store.count() > 0:
+        if use_rag and self.retriever.count() > 0:
             # Step 1: 检索相关文档
             logger.info(f"检索相关文档 (top_k={self.top_k})...")
-            search_results = self.vector_store.similarity_search(question, k=self.top_k)
+            search_results = self.retriever.similarity_search(question, k=self.top_k)
             contexts = [r["content"] for r in search_results]
 
             # Step 2: 构建 RAG prompt
@@ -201,14 +208,27 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_path",
         type=str,
-        default="outputs/merged_model",
+        default="outputs/outputs_codealpacas/merged_model",
         help="模型路径",
     )
     parser.add_argument(
         "--persist_dir",
         type=str,
         default="./chroma_db",
-        help="向量数据库持久化目录",
+        help="检索器持久化目录",
+    )
+    parser.add_argument(
+        "--collection",
+        type=str,
+        default="documents",
+        help="集合/索引名称",
+    )
+    parser.add_argument(
+        "--retriever",
+        type=str,
+        default=None,
+        choices=["bm25", "chromadb"],
+        help="检索器类型 (默认: chromadb / VectorStore)",
     )
     parser.add_argument(
         "--top_k",
@@ -238,10 +258,28 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # 构建检索器
+    if args.retriever == "bm25":
+        from bm25_store import BM25Store
+        ret = BM25Store(
+            persist_directory=args.persist_dir or "./bm25_index_swebench",
+            collection_name=args.collection or "swebench_instances",
+        )
+    elif args.retriever == "chromadb":
+        from vector_store import VectorStore
+        ret = VectorStore(
+            persist_directory=args.persist_dir or "./chroma_db_swebench",
+            collection_name=args.collection or "swebench_instances",
+        )
+    else:
+        ret = None  # fallback to default VectorStore
+
     pipeline = RAGPipeline(
         model_path=args.model_path,
         persist_dir=args.persist_dir,
+        collection_name=args.collection,
         top_k=args.top_k,
+        retriever=ret,
     )
 
     if args.mode == "compare":

@@ -3,6 +3,10 @@
 qwen3-finetune/data/raw/
 qwen3-finetune/data/processed/
 outputs_*/
+chroma_db_*/
+chroma_db/
+bm25_index_swebench/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

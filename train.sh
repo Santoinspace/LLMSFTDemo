@@ -1,9 +1,13 @@
 # 解决GBK报错
 set PYTHONUTF8=1
 
+# 启动服务
+python inference/api_server.py --model_path outputs/outputs_codealpacas/merged_model --enable_rag
+# 不带RAG
+curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"query": "How to handle database connection errors?", "use_rag": false}'
+
 # 训练
 python train/train.py --train_data data/processed/train.jsonl --val_data data/processed/val.jsonl --output_dir outputs_codealpacas
-
 # 继续训练
 python train/resume_train.py --train_data data/processed/train.jsonl --val_data data/processed/val.jsonl --output_dir outputs_codealpacas
 
@@ -12,12 +16,16 @@ python train/merge_lora.py --base_model Qwen/Qwen3-1.7B --adapter_path outputs_c
 
 # 快速推理测试
 python inference/inference.py --model_path outputs_codealpacas/merged_model --prompt "Write a Python function to check if a string is a palindrome"
+# 快速推理测试，没有sft，没有rag
+python rag/rag_pipeline.py --model_path Qwen/Qwen3-1.7B --mode no_rag --query "Write a Python function to safely parse JSON from untrusted input. Only code, do not explain"
 
 # 生成测试用例（从验证集抽取）
 python eval/generate_test_cases.py --input data/processed/val.jsonl --output eval/test_cases.jsonl --num_samples 30
 
 # 对比评估（逐条加载两个模型，8GB 够用）
 python eval/evaluate.py --base_model Qwen/Qwen3-1.7B --finetuned_model outputs_codealpacas/merged_model --test_data eval/test_cases.jsonl --output_dir eval_outputs
+# 四个对比试验
+python rag/compare_experiments.py --output eval_outputs/experiment_4group_codealpaca.json
 
 # 如何进一步测试微调效果
 1. 人工测试几道编程题，确认生成代码质量：
@@ -28,3 +36,58 @@ python inference/inference.py \
 python inference/api_server.py --model_path outputs_codealpacas/merged_model
 # 然后浏览器打开 http://localhost:8000/docs
 3. 如果觉得过拟合明显，下次可以考虑：只用 2 个 epoch、加更多数据（如 Magicoder）、增大 LoRA dropout。
+
+# RAG使用方式
+# 先看数据统计
+python rag/ingest_swebench.py --stats --max_instances 200
+
+# 小规模导入测试
+python rag/ingest_swebench.py --max_instances 100 --shuffle --output_jsonl data/swebench_chunks.jsonl
+
+# 全量导入
+python rag/ingest_swebench.py --shuffle
+
+# 只索引特定仓库
+python rag/ingest_swebench.py --filter_repo django/django
+
+# 然后用 RAG pipeline 检索
+python rag/rag_pipeline.py \
+    --persist_dir ./chroma_db_swebench \
+    --collection swebench_code \
+    --query "How to handle Django model save transactions?" \
+    --mode rag
+
+
+# 如果只想快速验证（不等全量脚本），可以直接用现有 CLI:
+cd E:/Apostgraduate/projection/LLMSFTDemo/qwen3-finetune
+
+# 实验 1: base + no_rag
+python rag/rag_pipeline.py --model_path Qwen/Qwen3-1.7B --mode no_rag --query "Write a Python function to safely parse JSON from untrusted input."
+
+# 实验 2: base + rag
+python rag/rag_pipeline.py \
+    --model_path Qwen/Qwen3-1.7B \
+    --retriever bm25 --persist_dir chroma_db_swebench --collection swebench_instances \
+    --mode rag \
+    --query "Write a Python function to safely parse JSON from untrusted input."
+
+# 实验 3: fine-tuned + no_rag
+python rag/rag_pipeline.py --model_path outputs_codealpacas/merged_model --mode no_rag --query "Write a Python function to safely parse JSON from untrusted input."
+
+# 实验 4: fine-tuned + rag
+python rag/rag_pipeline.py \
+    --model_path outputs_codealpacas/merged_model \
+    --retriever bm25 --persist_dir chroma_db_swebench --collection swebench_instances \
+    --mode rag \
+    --query "Write a Python function to safely parse JSON from untrusted input."
+
+或者使用 --mode compare 一次出两个答案（模型只加载一次）:
+# base 组: RAG vs no-RAG
+python rag/rag_pipeline.py --model_path Qwen/Qwen3-1.7B \
+    --retriever bm25 --persist_dir chroma_db_swebench --collection swebench_instances \
+    --mode compare --query "Write a Python function to safely parse JSON."
+
+# fine-tuned 组: RAG vs no-RAG
+python rag/rag_pipeline.py --model_path outputs_codealpacas/merged_model \
+    --retriever bm25 --persist_dir chroma_db_swebench --collection swebench_instances \
+    --mode compare --query "Write a Python function to safely parse JSON."

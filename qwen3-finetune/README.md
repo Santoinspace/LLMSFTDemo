@@ -67,7 +67,7 @@ python train/train.py \
 python train/merge_lora.py \
     --base_model Qwen/Qwen3-1.7B-Instruct \
     --adapter_path outputs/checkpoint-final \
-    --output_dir outputs/merged_model
+    --output_dir outputs/outputs_codealpacas/merged_model
 ```
 
 ### 6. 评估模型
@@ -75,7 +75,7 @@ python train/merge_lora.py \
 ```bash
 python eval/evaluate.py \
     --base_model Qwen/Qwen3-1.7B-Instruct \
-    --finetuned_model outputs/merged_model \
+    --finetuned_model outputs/outputs_codealpacas/merged_model \
     --test_data data/processed/val.jsonl \
     --output_dir eval_outputs
 ```
@@ -84,10 +84,72 @@ python eval/evaluate.py \
 
 ```bash
 python inference/api_server.py \
-    --model_path outputs/merged_model \
+    --model_path outputs/outputs_codealpacas/merged_model \
     --host 0.0.0.0 \
     --port 8000
 ```
+
+### 8. 构建 SWE-bench 代码知识库 (RAG + BM25)
+
+```bash
+# 查看数据集统计
+python rag/ingest_swebench.py --stats --max_instances 200
+
+# 导入知识库（纯 CPU，秒级索引）
+python rag/ingest_swebench.py --shuffle --retriever bm25
+
+# BM25 检索
+python rag/bm25_store.py \
+    --persist_dir ./bm25_index_swebench \
+    --collection swebench_instances \
+    --action search \
+    --query "database connection pooling" \
+    --k 5
+
+# RAG 问答
+python rag/rag_pipeline.py \
+    --retriever bm25 \
+    --persist_dir ./bm25_index_swebench \
+    --collection swebench_instances \
+    --query "How does Django handle database migrations?" \
+    --mode rag
+```
+
+---
+
+## PROJECT STATE
+
+| 模块 | 状态 | 备注 |
+|------|------|------|
+| 训练 (train/) | 完成 | CodeAlpaca-20k QLoRA 微调，3 epoch，loss 4.08→0.51 |
+| 评估 (eval/) | 完成 | PPL 34.3→2.0, ROUGE-L 0.09→0.45 |
+| 推理 (inference/) | 完成 | FastAPI + 批量推理可用 |
+| RAG - 向量检索 | 完成 | ChromaDB + BGE-M3，通用文档 QA |
+| RAG - BM25 检索 | **新增** | Whoosh BM25，SWE-bench 代码知识库，纯 CPU |
+| RAG - API 集成 | 预留 | `use_rag` 参数已定义，待接入 RAG pipeline |
+
+### 当前 RAG 检索器能力
+
+| 检索器 | 适用场景 | 检索方式 | 硬件 |
+|--------|---------|---------|------|
+| `bm25_store.py` | 代码搜索 / SWE-bench | BM25 倒排索引 | CPU |
+| `vector_store.py` | 通用文档 QA | BGE-M3 + Cosine ANN | GPU |
+
+---
+
+## RECENT DECISIONS
+
+### 2026-06-11: SWE-bench 知识库采用 Whoosh BM25 替代 ChromaDB + BGE-M3
+
+**决策**：将 SWE-bench_bm25_27K 导入方式从"代码文件分块 + BGE-M3 embedding + ChromaDB 向量检索"改为"完整实例文档 + Whoosh BM25 倒排索引"。
+
+**原因**：
+1. SWE-bench 数据集本身已将 BM25 作为文件检索方式，验证了 BM25 在代码搜索场景的有效性
+2. 代码富含 API 名、函数名、关键词——这些正是 BM25 擅长的精确匹配场景
+3. BGE-M3 (568M 参数) 在 RTX 4060 Laptop 上索引 100 实例需 ~15 分钟；BM25 索引同等数据 < 2 秒
+4. 用户提问时匹配最相关 issue，Princeton NLP 已做好的 BM25 检索结果（`text` 字段）可以直接作为 LLM 上下文，不需自建检索
+
+**实现**：创建 `rag/bm25_store.py`，接口与 `VectorStore` 完全一致（duck typing），`RAGPipeline` 通过 `retriever=` 参数接受任意检索器。
 
 ---
 
@@ -156,11 +218,14 @@ qwen3-finetune/
 │   ├── inference.py          # 单次推理
 │   ├── batch_inference.py    # 批量推理
 │   └── api_server.py         # FastAPI 服务
-└── rag/              # RAG 脚手架（预留）
-    ├── embeddings.py         # BGE-M3 embedding
-    ├── vector_store.py       # ChromaDB 封装
-    ├── document_processor.py # 文档分块
-    └── rag_pipeline.py       # RAG 流程
+└── rag/              # RAG 检索增强生成
+    ├── bm25_store.py         # Whoosh BM25 检索存储
+    ├── vector_store.py       # ChromaDB 向量存储封装
+    ├── embeddings.py         # BGE-M3 embedding 生成
+    ├── document_processor.py # 文档加载与分块
+    ├── rag_pipeline.py       # RAG 流程（检索 + 生成）
+    ├── ingest_swebench.py    # SWE-bench 知识库导入
+    └── README.md             # RAG 模块说明
 ```
 
 ---

@@ -161,7 +161,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="outputs/merged_model",
+        default="outputs/outputs_codealpacas/merged_model",
         help="合并后模型输出目录",
     )
     parser.add_argument(

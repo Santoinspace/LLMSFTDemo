@@ -224,7 +224,7 @@ def main():
     parser.add_argument(
         "--finetuned_model",
         type=str,
-        default="outputs/merged_model",
+        default="outputs/outputs_codealpacas/merged_model",
         help="微调后模型路径",
     )
     parser.add_argument(

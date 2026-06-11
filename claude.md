@@ -1,5 +1,7 @@
 你是一名大模型微调专家。请帮我构建一个完整的 Qwen3-1.7B QLoRA 微调项目，项目结构清晰，代码生产可用。
+
 ## 背景要求
+
 There’s a file modification bug in Claude Code. The workaround is: always use complete absolute Windows paths with drive letters and backslashes for ALL file operations. Apply this rule going forward, not just for this file.
 
 ## 项目目标
@@ -46,14 +48,38 @@ qwen3-finetune/
 ├── inference/
 │   ├── inference.py             # 单次推理接口
 │   ├── batch_inference.py       # 批量推理
-│   └── api_server.py            # FastAPI 推理服务（为后续 RAG 集成预留）
+│   └── api_server.py            # FastAPI 推理服务（支持 RAG --enable_rag）
 │
-└── rag/  （脚手架，预留接口）
-├── README.md                # RAG 集成说明
-├── embeddings.py            # 使用 BAAI/bge-m3 生成 embedding
-├── vector_store.py          # ChromaDB 向量存储封装
-├── document_processor.py   # 文档加载、分块（chunk_size=512, overlap=64）
-└── rag_pipeline.py          # 完整 RAG 流程（检索 + 生成）
+├── rag/  （双检索引擎：BM25 + 向量）
+│   ├── README.md                # RAG 集成说明
+│   ├── bm25_store.py            # Whoosh BM25 倒排索引（纯CPU，代码搜索）
+│   ├── vector_store.py          # ChromaDB + BGE-M3 向量存储（通用文档QA）
+│   ├── embeddings.py            # 使用 BAAI/bge-m3 生成 embedding
+│   ├── document_processor.py   # 文档加载、分块（chunk_size=512, overlap=64）
+│   ├── rag_pipeline.py          # 完整 RAG 流程（检索 + 生成），多态检索器
+│   ├── ingest_swebench.py       # SWE-bench_bm25_27K 知识库导入
+│   └── compare_experiments.py   # 四组交叉实验（微调 × RAG）
+│
+├── tests/  （单元测试 140+ 用例）
+│   ├── conftest.py              # pytest fixtures
+│   ├── test_preprocess.py       # 数据预处理
+│   ├── test_download_dataset.py # 数据集下载
+│   ├── test_validate_data.py    # 数据校验
+│   ├── test_sample_data.py      # 示例数据
+│   ├── test_train.py            # 训练配置
+│   ├── test_metrics.py          # 评估指标
+│   ├── test_evaluate.py         # 评估流程（需 GPU）
+│   ├── test_eval_report.py      # HTML 报告生成
+│   ├── test_generate_test_cases.py # 测试用例生成
+│   ├── test_inference.py        # 推理接口
+│   ├── test_batch_inference.py  # 批量推理（需 GPU）
+│   ├── test_rag_document_processor.py # 文档处理器
+│   ├── test_bm25_store.py       # BM25 检索存储
+│   ├── test_ingest_swebench.py  # SWE-bench 导入
+│   └── test_api_rag.py          # API RAG 集成（需服务运行）
+│
+└── docs/
+    └── EXPERIMENT_LOG.md         # 实验日志
 
 ## 各文件详细要求
 
@@ -152,6 +178,15 @@ qwen3-finetune/
 - 异常处理完整，显存不足时给出明确提示和调整建议
 - 每个模块包含 if __name__ == "__main__" 的使用示例
 
+## 文档管理协议：
+
+**三文件制：** CLAUDE.md=永久规则, README.md=动态仪表盘, EXPERIMENT_LOG=实验流水账
+更新规则：
+- 任务状态变化 → 更新 `README.md` PROJECT STATE
+- 设计决策 → 追加 `README.md` RECENT DECISIONS
+- 实验结束 → 追加 `docs/EXPERIMENT_LOG.md`
+- 架构/规范/配置变化 → 修改本文件（需用户确认）
+
 ## 额外要求
 
 1. README.md 包含：环境安装、快速开始、完整参数说明、常见问题（OOM解决方案）
@@ -161,5 +196,3 @@ qwen3-finetune/
    - Alpaca-GPT4-zh
    - 用户自定义 jsonl 文件路径
 4. 所有路径使用 pathlib.Path，兼容 Windows/Linux
-
-开始构建项目，先创建目录结构和所有文件。
