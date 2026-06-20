@@ -125,8 +125,9 @@ python rag/rag_pipeline.py \
 | 评估 (eval/) | 完成 | PPL 34.3→2.0, ROUGE-L 0.09→0.45 |
 | 推理 (inference/) | 完成 | FastAPI + 批量推理可用 |
 | RAG - 向量检索 | 完成 | ChromaDB + BGE-M3，通用文档 QA |
-| RAG - BM25 检索 | **新增** | Whoosh BM25，SWE-bench 代码知识库，纯 CPU |
-| RAG - API 集成 | 预留 | `use_rag` 参数已定义，待接入 RAG pipeline |
+| RAG - BM25 检索 | 完成 | Whoosh BM25，SWE-bench 代码知识库，纯 CPU |
+| RAG - API 集成 | **完成** | `--enable_rag` 接入 BM25 检索，`use_rag` 参数可用 |
+| 四组实验 (SFT × RAG) | **CodeAlpaca 30题完成** | SFT 碾压级提升，RAG 领域不匹配时有害；待 SWE-bench 测试集 |
 
 ### 当前 RAG 检索器能力
 
@@ -138,6 +139,18 @@ python rag/rag_pipeline.py \
 ---
 
 ## RECENT DECISIONS
+
+### 2026-06-12: CodeAlpaca 30 题四组实验 — RAG 在领域不匹配时对微调模型有害
+
+**实验**：在 CodeAlpaca 30 题上跑四组交叉实验 (base | ft) × (no-RAG | with-RAG)。
+
+**结论**：
+1. SFT 是绝对主力：ROUGE-L 0.09→0.49 (5.3×), BLEU-4 0.01→0.27 (24×)
+2. RAG 对 ft 模型有害：BLEU-4 0.27→0.18 (-33.5%), ROUGE-L 0.49→0.47
+3. **根因**：CodeAlpaca 通用编程题与 SWE-bench issue/patch 知识库领域完全不匹配，检索回的上下文是噪音而非信号
+4. **方向验证**：RAG 不能乱加——必须构建 SWE-bench 领域测试集 (Phase 3) 才能客观评估 RAG 价值
+
+详见 `docs/EXPERIMENT_LOG.md`。
 
 ### 2026-06-11: SWE-bench 知识库采用 Whoosh BM25 替代 ChromaDB + BGE-M3
 
