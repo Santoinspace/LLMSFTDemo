@@ -1,5 +1,77 @@
 # 解决GBK报错
+chcp 65001
 set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
+# 快速切换目录
+cd E:/Apostgraduate/projection/LLMSFTDemo/qwen3-finetune
+
+
+# 工单数据集上SFT
+python train/train.py ^
+      --qlora_config configs/qlora_qwen3-1.7b_wl-cs_r16_len512_ep3.yaml ^
+      --training_config configs/training_qwen3-1.7b_wl-cs.yaml ^
+      --train_data data/wl_customer_support_split/sft_train.jsonl ^
+      --val_data data/wl_customer_support_split/sft_val.jsonl ^
+      --output_dir outputs/outputs_wl_customer_support
+
+# 工单数据集上断点续训
+python train/resume_train.py ^
+      --qlora_config configs/qlora_qwen3-1.7b_wl-cs_r16_len512_ep3.yaml ^
+      --training_config configs/training_qwen3-1.7b_wl-cs.yaml ^
+      --train_data data/wl_customer_support_split/sft_train.jsonl ^
+      --val_data data/wl_customer_support_split/sft_val.jsonl ^
+      --output_dir outputs/outputs_wl_customer_support
+
+
+# base + no_rag
+python rag/rag_pipeline.py ^
+    --model_path Qwen/Qwen3-1.7B ^
+    --mode no_rag ^
+    --query "Write a Python function to safely parse JSON from untrusted input."
+
+# base + rag
+python rag/rag_pipeline.py ^
+    --model_path Qwen/Qwen3-1.7B ^
+    --retriever bm25 ^
+    --persist_dir chroma_db_swebench ^
+    --collection swebench_instances ^
+    --mode rag ^
+    --query "Write a Python function to safely parse JSON from untrusted input."
+
+# fine-tuned + no_rag
+python rag/rag_pipeline.py ^
+    --model_path outputs/outputs_codealpacas/merged_model ^
+    --mode no_rag ^
+    --query "Write a Python function to safely parse JSON from untrusted input."
+
+# fine-tuned + rag
+python rag/rag_pipeline.py ^
+    --model_path outputs/outputs_codealpacas/merged_model ^
+    --retriever bm25 ^
+    --persist_dir chroma_db_swebench ^
+    --collection swebench_instances ^
+    --mode rag ^
+    --query "Write a Python function to safely parse JSON from untrusted input."
+
+或者使用 --mode compare 一次出两个答案（模型只加载一次）:
+# base 组: RAG vs no-RAG
+python rag/rag_pipeline.py ^
+    --model_path Qwen/Qwen3-1.7B ^
+    --retriever bm25 ^
+    --persist_dir chroma_db_swebench ^
+    --collection swebench_instances ^
+    --mode compare ^
+    --query "Write a Python function to safely parse JSON."
+
+# fine-tuned 组: RAG vs no-RAG
+python rag/rag_pipeline.py ^
+    --model_path outputs_codealpacas/merged_model ^
+    --retriever bm25 ^
+    --persist_dir chroma_db_swebench ^
+    --collection swebench_instances ^
+    --mode compare ^
+    --query "Write a Python function to safely parse JSON."
+
 
 # 启动服务
 python inference/api_server.py --model_path outputs/outputs_codealpacas/merged_model --enable_rag
@@ -40,46 +112,16 @@ python inference/api_server.py --model_path outputs_codealpacas/merged_model
 # RAG使用方式
 # 先看数据统计
 python rag/ingest_swebench.py --stats --max_instances 200
-
 # 小规模导入测试
 python rag/ingest_swebench.py --max_instances 100 --shuffle --output_jsonl data/swebench_chunks.jsonl
-
 # 全量导入
 python rag/ingest_swebench.py --shuffle
-
 # 只索引特定仓库
 python rag/ingest_swebench.py --filter_repo django/django
 
 # 然后用 RAG pipeline 检索
-python rag/rag_pipeline.py \
-    --persist_dir ./chroma_db_swebench \
-    --collection swebench_code \
-    --query "How to handle Django model save transactions?" \
+python rag/rag_pipeline.py ^
+    --persist_dir ./chroma_db_swebench ^
+    --collection swebench_code ^
+    --query "How to handle Django model save transactions?" ^
     --mode rag
-
-
-# 如果只想快速验证（不等全量脚本），可以直接用现有 CLI:
-cd E:/Apostgraduate/projection/LLMSFTDemo/qwen3-finetune
-
-# 实验 1: base + no_rag
-python rag/rag_pipeline.py --model_path Qwen/Qwen3-1.7B --mode no_rag --query "Write a Python function to safely parse JSON from untrusted input."
-
-# 实验 2: base + rag
-python rag/rag_pipeline.py --model_path Qwen/Qwen3-1.7B --retriever bm25 --persist_dir chroma_db_swebench --collection swebench_instances --mode rag --query "Write a Python function to safely parse JSON from untrusted input."
-
-# 实验 3: fine-tuned + no_rag
-python rag/rag_pipeline.py --model_path outputs/outputs_codealpacas/merged_model --mode no_rag --query "Write a Python function to safely parse JSON from untrusted input."
-
-# 实验 4: fine-tuned + rag
-python rag/rag_pipeline.py --model_path outputs/outputs_codealpacas/merged_model --retriever bm25 --persist_dir chroma_db_swebench --collection swebench_instances --mode rag --query "Write a Python function to safely parse JSON from untrusted input."
-
-或者使用 --mode compare 一次出两个答案（模型只加载一次）:
-# base 组: RAG vs no-RAG
-python rag/rag_pipeline.py --model_path Qwen/Qwen3-1.7B \
-    --retriever bm25 --persist_dir chroma_db_swebench --collection swebench_instances \
-    --mode compare --query "Write a Python function to safely parse JSON."
-
-# fine-tuned 组: RAG vs no-RAG
-python rag/rag_pipeline.py --model_path outputs_codealpacas/merged_model \
-    --retriever bm25 --persist_dir chroma_db_swebench --collection swebench_instances \
-    --mode compare --query "Write a Python function to safely parse JSON."

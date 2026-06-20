@@ -177,11 +177,13 @@ qwen3-finetune/
 - 使用 logging 而非 print（日志级别可配置）
 - 异常处理完整，显存不足时给出明确提示和调整建议
 - 每个模块包含 if __name__ == "__main__" 的使用示例
+- 给用户手动运行的指令以'^'作为分隔符（CMD环境）
 
 ## 文档管理协议：
 
 **三文件制：** CLAUDE.md=永久规则, README.md=动态仪表盘, EXPERIMENT_LOG=实验流水账
 更新规则：
+
 - 任务状态变化 → 更新 `README.md` PROJECT STATE
 - 设计决策 → 追加 `README.md` RECENT DECISIONS
 - 实验结束 → 追加 `docs/EXPERIMENT_LOG.md`

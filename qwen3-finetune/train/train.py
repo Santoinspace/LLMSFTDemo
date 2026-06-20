@@ -157,13 +157,13 @@ def main():
     parser.add_argument(
         "--qlora_config",
         type=str,
-        default="configs/qlora_config.yaml",
+        default="configs/qlora_qwen3-1.7b_codealpaca_r16_len1024_ep3.yaml",
         help="QLoRA 配置文件路径",
     )
     parser.add_argument(
         "--training_config",
         type=str,
-        default="configs/training_config.yaml",
+        default="configs/training_qwen3-1.7b_codealpaca.yaml",
         help="训练配置文件路径",
     )
     parser.add_argument(

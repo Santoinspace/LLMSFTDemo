@@ -2,14 +2,14 @@
 .claude/
 qwen3-finetune/data/raw/
 qwen3-finetune/data/processed/
-outputs_*/
 chroma_db_*/
 chroma_db/
 bm25_index_swebench/
 docs/
 data/
+outputs_*/
 *outputs/
-outputs/
+outputs/*/
 
 
 # Byte-compiled / optimized / DLL files

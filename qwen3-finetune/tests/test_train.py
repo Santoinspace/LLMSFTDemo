@@ -14,7 +14,7 @@ class TestQLoRAConfig:
     """测试 QLoRA 配置文件"""
 
     def test_config_is_valid_yaml(self):
-        config_path = Path(__file__).parent.parent / "configs" / "qlora_config.yaml"
+        config_path = Path(__file__).parent.parent / "configs" / "qlora_qwen3-1.7b_codealpaca_r16_len1024_ep3.yaml"
         assert config_path.exists()
 
         with open(config_path, "r", encoding="utf-8") as f:
@@ -44,7 +44,7 @@ class TestQLoRAConfig:
         assert config["save_and_logging"]["save_steps"] == 200
 
     def test_all_attention_layers_targeted(self):
-        config_path = Path(__file__).parent.parent / "configs" / "qlora_config.yaml"
+        config_path = Path(__file__).parent.parent / "configs" / "qlora_qwen3-1.7b_codealpaca_r16_len1024_ep3.yaml"
         with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
 
@@ -57,7 +57,7 @@ class TestTrainingConfig:
     """测试训练配置文件"""
 
     def test_config_is_valid_yaml(self):
-        config_path = Path(__file__).parent.parent / "configs" / "training_config.yaml"
+        config_path = Path(__file__).parent.parent / "configs" / "training_qwen3-1.7b_codealpaca.yaml"
         assert config_path.exists()
 
         with open(config_path, "r", encoding="utf-8") as f:

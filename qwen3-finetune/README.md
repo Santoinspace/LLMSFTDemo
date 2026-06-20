@@ -54,8 +54,8 @@ python data/validate_data.py --input data/processed/train.jsonl
 
 ```bash
 python train/train.py \
-    --qlora_config configs/qlora_config.yaml \
-    --training_config configs/training_config.yaml \
+    --qlora_config configs/qlora_qwen3-1.7b_codealpaca_r16_len1024_ep3.yaml \
+    --training_config configs/training_qwen3-1.7b_codealpaca.yaml \
     --train_data data/processed/train.jsonl \
     --val_data data/processed/val.jsonl \
     --output_dir outputs
@@ -127,7 +127,9 @@ python rag/rag_pipeline.py \
 | RAG - 向量检索 | 完成 | ChromaDB + BGE-M3，通用文档 QA |
 | RAG - BM25 检索 | 完成 | Whoosh BM25，SWE-bench 代码知识库，纯 CPU |
 | RAG - API 集成 | **完成** | `--enable_rag` 接入 BM25 检索，`use_rag` 参数可用 |
-| 四组实验 (SFT × RAG) | **CodeAlpaca 30题完成** | SFT 碾压级提升，RAG 领域不匹配时有害；待 SWE-bench 测试集 |
+| 四组实验 (SFT × RAG) | **CodeAlpaca 30题完成** | SFT 碾压级提升，RAG 领域不匹配时有害；待领域测试集 |
+| 数据 — W-L 客服分割 | **完成** | 28,254 条伪时间分割，SFT 80% + RAG 20%，含 rag_eval 1,415 题 |
+| 数据 — SWE-bench 测试集 | 待构建 | Phase 3，从 validation split 抽 15-20 题 |
 
 ### 当前 RAG 检索器能力
 
@@ -139,6 +141,24 @@ python rag/rag_pipeline.py \
 ---
 
 ## RECENT DECISIONS
+
+### 2026-06-18: 新增 W-L 客服数据集 — 单领域 SFT+RAG 伪时间分割
+
+**数据**：`W-L/Customer-service-tickets-qwen-qa` (28,254 条有效 QA)，通过 `scripts/split_wl_customer_support.py` 确定性分割。
+
+**分割方案**（伪时间模拟）：
+
+| 时间切面 | 用途 | 条数 | 格式 |
+|----------|------|------|------|
+| 2026-05 | SFT train | 19,777 | `{"text": "<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n..."}` |
+| 2026-05 | SFT val | 1,412 | 同上 |
+| 2026-05 | SFT test | 1,412 | 同上 |
+| 2026-06 | RAG corpus | 4,238 | `{"id", "content", "metadata": {...}}` |
+| 2026-06 | RAG eval | 1,415 | `{"question", "reference", ...}` |
+
+**设计动机**：CodeAlpaca 实验暴露 SWE-bench 知识库与通用编程题领域不匹配导致 RAG 有害。W-L 数据集确保 SFT 训练、RAG 检索库、评测题三者在同一客服领域，RAG 有真实发挥空间。
+
+**已知问题**：`rag_corpus.jsonl` 的 `content` 字段当前包含 `support_answer`（`"Customer ticket:\n{user_query}\n\nSupport answer:\n{support_answer}"`），BM25 索引时会检索到答案文本，造成检索作弊。`support_answer` 已在 `metadata` 中单独保存，`content` 应仅保留 `user_query`。待后续修复后重新生成分割。
 
 ### 2026-06-12: CodeAlpaca 30 题四组实验 — RAG 在领域不匹配时对微调模型有害
 
@@ -168,7 +188,7 @@ python rag/rag_pipeline.py \
 
 ## 完整参数说明
 
-### QLoRA 配置（configs/qlora_config.yaml）
+### QLoRA 配置（configs/qlora_qwen3-1.7b_codealpaca_r16_len1024_ep3.yaml）
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
@@ -194,7 +214,7 @@ python rag/rag_pipeline.py \
 | logging_steps | 10 | 日志步数 |
 | eval_steps | 100 | 评估步数 |
 
-### 训练配置（configs/training_config.yaml）
+### 训练配置（configs/training_qwen3-1.7b_codealpaca.yaml）
 
 | 参数 | 说明 |
 |------|------|
@@ -212,7 +232,11 @@ python rag/rag_pipeline.py \
 
 ```
 qwen3-finetune/
-├── configs/          # 配置文件
+├── configs/          # 配置文件 ({type}_{model}_{dataset}_r{r}_len{len}_ep{epochs})
+│   ├── qlora_qwen3-1.7b_codealpaca_r16_len1024_ep3.yaml
+│   ├── training_qwen3-1.7b_codealpaca.yaml
+│   ├── qlora_qwen3-1.7b_wl-cs_r16_len512_ep3.yaml
+│   └── training_qwen3-1.7b_wl-cs.yaml
 ├── data/             # 数据处理
 │   ├── download_dataset.py   # 数据集下载
 │   ├── preprocess.py         # 数据预处理
@@ -231,14 +255,19 @@ qwen3-finetune/
 │   ├── inference.py          # 单次推理
 │   ├── batch_inference.py    # 批量推理
 │   └── api_server.py         # FastAPI 服务
-└── rag/              # RAG 检索增强生成
-    ├── bm25_store.py         # Whoosh BM25 检索存储
-    ├── vector_store.py       # ChromaDB 向量存储封装
-    ├── embeddings.py         # BGE-M3 embedding 生成
-    ├── document_processor.py # 文档加载与分块
-    ├── rag_pipeline.py       # RAG 流程（检索 + 生成）
-    ├── ingest_swebench.py    # SWE-bench 知识库导入
-    └── README.md             # RAG 模块说明
+├── rag/              # RAG 检索增强生成
+│   ├── bm25_store.py         # Whoosh BM25 检索存储
+│   ├── vector_store.py       # ChromaDB 向量存储封装
+│   ├── embeddings.py         # BGE-M3 embedding 生成
+│   ├── document_processor.py # 文档加载与分块
+│   ├── rag_pipeline.py       # RAG 流程（检索 + 生成）
+│   ├── ingest_swebench.py    # SWE-bench 知识库导入
+│   └── README.md             # RAG 模块说明
+├── scripts/          # 数据工程脚本
+│   └── split_wl_customer_support.py  # W-L 客服数据伪时间分割
+└── tests/            # 测试（15 个文件，140+ 用例）
+    ├── test_split_wl_customer_support.py  # W-L 分割测试
+    └── ...
 ```
 
 ---
