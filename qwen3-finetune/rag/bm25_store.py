@@ -16,7 +16,7 @@ from typing import Dict, List, Optional
 from whoosh import index
 from whoosh.analysis import StandardAnalyzer
 from whoosh.fields import ID, NUMERIC, TEXT, Schema
-from whoosh.qparser import MultifieldParser
+from whoosh.qparser import MultifieldParser, OrGroup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,7 +107,9 @@ class BM25Store:
         results_list = []
         with self._idx.searcher() as searcher:
             parser = MultifieldParser(
-                ["content", "repo"], self._idx.schema
+                ["content", "repo"],
+                self._idx.schema,
+                group=OrGroup.factory(0.9),
             )
             q = parser.parse(query)
 

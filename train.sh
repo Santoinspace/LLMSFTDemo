@@ -22,6 +22,21 @@ python train/resume_train.py ^
       --val_data data/wl_customer_support_split/sft_val.jsonl ^
       --output_dir outputs/outputs_wl_customer_support
 
+# 工单数据集上测试
+python eval/compare_validate.py ^
+  --base_model Qwen/Qwen3-1.7B ^
+  --finetuned_model outputs/outputs_wl_customer_support/merged_model ^
+  --test_cases data/wl_customer_support_split/rag_eval.jsonl ^
+  --retriever bm25 ^
+  --retriever_path bm25_index_wl_customer_support ^
+  --retriever_collection wl_customer_support ^
+  --modes both ^
+  --batch_size 4 ^
+  --max_samples 300 ^
+  --max_new_tokens 160 ^
+  --top_k 2 ^
+  --temperature 0 ^
+  --output eval_outputs/wl_customer_support/compare_validate_300.json
 
 # base + no_rag
 python rag/rag_pipeline.py ^

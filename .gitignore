@@ -5,6 +5,7 @@ qwen3-finetune/data/processed/
 chroma_db_*/
 chroma_db/
 bm25_index_swebench/
+bm25_index_wl_customer_support/
 docs/
 data/
 outputs_*/

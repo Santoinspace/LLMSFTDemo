@@ -110,7 +110,10 @@ def load_model(model_path: str, load_in_4bit: bool = True):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    kwargs = {"trust_remote_code": True}
+    kwargs = {
+        "trust_remote_code": True,
+        "attn_implementation": "sdpa",
+    }
     if torch.cuda.is_available():
         kwargs["device_map"] = "auto"
     else:
@@ -123,20 +126,33 @@ def load_model(model_path: str, load_in_4bit: bool = True):
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
+    elif torch.cuda.is_available():
+        kwargs["torch_dtype"] = torch.float16
 
     model = AutoModelForCausalLM.from_pretrained(model_path, **kwargs)
     model.eval()
     return model, tokenizer
 
 
-def generate(model, tokenizer, messages: List[dict], max_new_tokens: int, temperature: float):
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
-    input_len = inputs["input_ids"].shape[1]
+def generate_batch(
+    model,
+    tokenizer,
+    messages_batch: List[List[dict]],
+    max_new_tokens: int,
+    temperature: float,
+):
+    texts = [
+        tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        for messages in messages_batch
+    ]
+    tokenizer.padding_side = "left"
+    inputs = tokenizer(texts, return_tensors="pt", padding=True).to(model.device)
+    input_width = inputs["input_ids"].shape[1]
 
     start = time.time()
     with torch.no_grad():
@@ -149,9 +165,14 @@ def generate(model, tokenizer, messages: List[dict], max_new_tokens: int, temper
             pad_token_id=tokenizer.eos_token_id,
         )
     elapsed = time.time() - start
-    new_tokens = outputs[0][input_len:]
-    prediction = tokenizer.decode(new_tokens, skip_special_tokens=True)
-    return prediction, elapsed, len(new_tokens)
+    generated = outputs[:, input_width:]
+    predictions = tokenizer.batch_decode(generated, skip_special_tokens=True)
+    token_counts = [
+        int((row != tokenizer.pad_token_id).sum().item())
+        for row in generated
+    ]
+    per_sample_time = elapsed / max(len(messages_batch), 1)
+    return predictions, [per_sample_time] * len(predictions), token_counts
 
 
 def build_retriever(args):
@@ -160,17 +181,28 @@ def build_retriever(args):
     if args.retriever == "bm25":
         from bm25_store import BM25Store
 
-        return BM25Store(
+        retriever = BM25Store(
             persist_directory=args.retriever_path,
             collection_name=args.retriever_collection,
         )
+        if retriever.count() == 0:
+            raise ValueError(
+                f"BM25 index is empty: {args.retriever_path}/{args.retriever_collection}"
+            )
+        return retriever
     if args.retriever == "chromadb":
         from vector_store import VectorStore
 
-        return VectorStore(
+        retriever = VectorStore(
             persist_directory=args.retriever_path,
             collection_name=args.retriever_collection,
         )
+        if retriever.count() == 0:
+            raise ValueError(
+                f"ChromaDB collection is empty: "
+                f"{args.retriever_path}/{args.retriever_collection}"
+            )
+        return retriever
     raise ValueError(f"Unknown retriever: {args.retriever}")
 
 
@@ -206,51 +238,58 @@ def evaluate_model(
     temperature: float,
     top_k: int,
     load_in_4bit: bool,
+    batch_size: int,
+    modes: str,
 ) -> Dict:
     logger.info("=" * 60)
     logger.info("Evaluating %s: %s", label, model_path)
     logger.info("=" * 60)
     model, tokenizer = load_model(model_path, load_in_4bit=load_in_4bit)
 
-    groups = {"no_rag": {"predictions": [], "times": [], "tokens": []}}
-    if retriever is not None:
+    groups = {}
+    if modes in {"no_rag", "both"}:
+        groups["no_rag"] = {"predictions": [], "times": [], "tokens": []}
+    if retriever is not None and modes in {"rag", "both"}:
         groups["rag"] = {"predictions": [], "times": [], "tokens": []}
 
     samples = []
-    for i, case in enumerate(cases, 1):
-        logger.info("[%s] %s/%s: %s", label, i, len(cases), case["question"][:80])
+    for start in range(0, len(cases), batch_size):
+        batch = cases[start : start + batch_size]
+        logger.info("[%s] %s-%s/%s", label, start + 1, start + len(batch), len(cases))
+        batch_samples = [
+            {"question": case["question"], "reference": case["reference"]}
+            for case in batch
+        ]
 
-        pred, elapsed, ntok = generate(
-            model,
-            tokenizer,
-            case["prompt_messages"],
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-        )
-        groups["no_rag"]["predictions"].append(pred)
-        groups["no_rag"]["times"].append(elapsed)
-        groups["no_rag"]["tokens"].append(ntok)
-
-        sample = {
-            "question": case["question"],
-            "reference": case["reference"],
-            "no_rag": pred,
-        }
-
-        if retriever is not None:
-            pred_rag, elapsed_rag, ntok_rag = generate(
+        if "no_rag" in groups:
+            predictions, times, tokens = generate_batch(
                 model,
                 tokenizer,
-                rag_messages(case["question"], retriever, top_k),
+                [case["prompt_messages"] for case in batch],
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
             )
-            groups["rag"]["predictions"].append(pred_rag)
-            groups["rag"]["times"].append(elapsed_rag)
-            groups["rag"]["tokens"].append(ntok_rag)
-            sample["rag"] = pred_rag
+            groups["no_rag"]["predictions"].extend(predictions)
+            groups["no_rag"]["times"].extend(times)
+            groups["no_rag"]["tokens"].extend(tokens)
+            for sample, prediction in zip(batch_samples, predictions):
+                sample["no_rag"] = prediction
 
-        samples.append(sample)
+        if "rag" in groups:
+            predictions, times, tokens = generate_batch(
+                model,
+                tokenizer,
+                [case["rag_prompt_messages"] for case in batch],
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+            )
+            groups["rag"]["predictions"].extend(predictions)
+            groups["rag"]["times"].extend(times)
+            groups["rag"]["tokens"].extend(tokens)
+            for sample, prediction in zip(batch_samples, predictions):
+                sample["rag"] = prediction
+
+        samples.extend(batch_samples)
 
     references = [case["reference"] for case in cases]
     metrics = {
@@ -295,10 +334,12 @@ def parse_args():
     parser.add_argument("--retriever", choices=["none", "bm25", "chromadb"], default="none")
     parser.add_argument("--retriever_path", type=str, default="bm25_index_swebench")
     parser.add_argument("--retriever_collection", type=str, default="swebench_instances")
-    parser.add_argument("--top_k", type=int, default=5)
+    parser.add_argument("--top_k", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--modes", choices=["no_rag", "rag", "both"], default="both")
     parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--max_new_tokens", type=int, default=256)
-    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--max_new_tokens", type=int, default=160)
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--no_4bit", action="store_true")
     return parser.parse_args()
 
@@ -307,6 +348,8 @@ def main():
     args = parse_args()
     if not args.base_model and not args.finetuned_model:
         raise ValueError("At least one of --base_model or --finetuned_model is required.")
+    if args.batch_size < 1:
+        raise ValueError("--batch_size must be at least 1.")
 
     cases = load_test_cases(Path(args.test_cases), args.max_samples)
     if not cases:
@@ -314,6 +357,14 @@ def main():
     logger.info("Loaded %s test cases", len(cases))
 
     retriever = build_retriever(args)
+    if args.modes == "rag" and retriever is None:
+        raise ValueError("--modes rag requires --retriever bm25 or chromadb.")
+    if retriever is not None and args.modes in {"rag", "both"}:
+        logger.info("Precomputing retrieval contexts for %s cases", len(cases))
+        for case in cases:
+            case["rag_prompt_messages"] = rag_messages(
+                case["question"], retriever, args.top_k
+            )
     results = {}
     if args.base_model:
         results["base"] = evaluate_model(
@@ -325,6 +376,8 @@ def main():
             args.temperature,
             args.top_k,
             load_in_4bit=not args.no_4bit,
+            batch_size=args.batch_size,
+            modes=args.modes,
         )
     if args.finetuned_model:
         results["finetuned"] = evaluate_model(
@@ -336,6 +389,8 @@ def main():
             args.temperature,
             args.top_k,
             load_in_4bit=not args.no_4bit,
+            batch_size=args.batch_size,
+            modes=args.modes,
         )
 
     output = Path(args.output)
@@ -350,6 +405,8 @@ def main():
             "retriever_path": args.retriever_path,
             "retriever_collection": args.retriever_collection,
             "top_k": args.top_k,
+            "batch_size": args.batch_size,
+            "modes": args.modes,
             "max_new_tokens": args.max_new_tokens,
         },
         "results": results,

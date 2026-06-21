@@ -121,13 +121,13 @@ python rag/rag_pipeline.py \
 
 | 模块 | 状态 | 备注 |
 |------|------|------|
-| 训练 (train/) | 完成 | CodeAlpaca-20k QLoRA 微调，3 epoch，loss 4.08→0.51 |
-| 评估 (eval/) | 完成 | PPL 34.3→2.0, ROUGE-L 0.09→0.45 |
+| 训练 (train/) | 完成 | CodeAlpaca-20k (loss 4.08→0.51) + W-L 客服 (loss 3.54→0.15), 各 3 epoch |
+| 评估 (eval/) | 完成 | `compare_validate.py` 统一评估脚本已就位，支持多格式 + 可选 RAG |
 | 推理 (inference/) | 完成 | FastAPI + 批量推理可用 |
 | RAG - 向量检索 | 完成 | ChromaDB + BGE-M3，通用文档 QA |
 | RAG - BM25 检索 | 完成 | Whoosh BM25，SWE-bench 代码知识库，纯 CPU |
 | RAG - API 集成 | **完成** | `--enable_rag` 接入 BM25 检索，`use_rag` 参数可用 |
-| 四组实验 (SFT × RAG) | **CodeAlpaca 30题完成** | SFT 碾压级提升，RAG 领域不匹配时有害；待领域测试集 |
+| 四组实验 (SFT × RAG) | **CodeAlpaca 30题完成** | SFT 碾压级提升，RAG 领域不匹配时有害；W-L 客服待运行 |
 | 数据 — W-L 客服分割 | **完成** | 28,254 条伪时间分割，SFT 80% + RAG 20%，含 rag_eval 1,415 题 |
 | 数据 — SWE-bench 测试集 | 待构建 | Phase 3，从 validation split 抽 15-20 题 |
 
@@ -141,6 +141,38 @@ python rag/rag_pipeline.py \
 ---
 
 ## RECENT DECISIONS
+
+### 2026-06-20: 统一评估脚本 `compare_validate.py` — 合并 evaluate + compare_experiments
+
+**动机**：`evaluate.py` 仅支持 `messages` 格式，读取 W-L 的 `text` 格式 (ChatML) 时报 all-0；`compare_experiments.py` 依赖 RAGPipeline 加载模型，不够灵活；两者功能重叠（base/ft 对比 + RAG 对比）。
+
+**统一方案**：创建 `eval/compare_validate.py`，一次脚本覆盖所有对比场景：
+
+- **多格式自动兼容**：`question`+`reference`、`question`+`expected_answer`、`messages`+`reference`、`messages` 内含 assistant 回复
+- **模型直加载**：不依赖 RAGPipeline，直接 4-bit 加载 base/ft 模型
+- **可选 RAG**：`--retriever bm25` 可接入 BM25 检索，不指定则纯模型对比
+- **修复旧 bug**：仅将 user 消息作为生成输入，不再泄露 reference 给模型
+- **输出结构**：`{base: {no_rag, rag}, finetuned: {no_rag, rag}}` — 2 组无 RAG / 4 组有 RAG
+- **简洁指标**：ROUGE-1/2/L, BLEU-4, avg_length, avg_tokens, tokens_per_sec
+
+`rag/compare_experiments.py` 和 `eval/evaluate.py` 保留为参考，新实验统一用 `compare_validate.py`。
+
+用法：
+```bash
+# 纯 model 对比（base vs ft）
+python eval/compare_validate.py --base_model ... --finetuned_model ... --test_cases data/sft_test.jsonl
+
+# 带 RAG 的四组对比
+python eval/compare_validate.py --base_model ... --finetuned_model ... \
+    --test_cases data/rag_eval.jsonl --retriever bm25 \
+    --retriever_path bm25_index_wl_customer_support --retriever_collection wl_customer_support
+```
+
+### 2026-06-19: W-L 客服 SFT 训练完成 — base model 仍然可用
+
+**训练**：`train.sh` (续训模式) → 3 epoch, 3,711 steps, **train_loss 0.15**（最终步）。当前 checkpoint-final 为续训产物，base model (Qwen/Qwen3-1.7B) 仍保留在 `~/.cache/huggingface/`，评估时同时加载两者。
+
+**配置**：`qlora_qwen3-1.7b_wl-cs_r16_len512_ep3.yaml`，max_seq_length=512（P99.9=415，几乎无截断）。
 
 ### 2026-06-18: 新增 W-L 客服数据集 — 单领域 SFT+RAG 伪时间分割
 
@@ -247,7 +279,8 @@ qwen3-finetune/
 │   ├── merge_lora.py         # LoRA 权重合并
 │   └── resume_train.py       # 断点续训
 ├── eval/             # 评估脚本
-│   ├── evaluate.py           # 评估主脚本
+│   ├── compare_validate.py   # 统一对比验证（base/ft × RAG）
+│   ├── evaluate.py           # 评估主脚本（旧版，仅支持 messages 格式）
 │   ├── metrics.py            # 指标计算
 │   ├── generate_test_cases.py # 测试用例生成
 │   └── eval_report.py        # HTML 报告生成
@@ -262,6 +295,7 @@ qwen3-finetune/
 │   ├── document_processor.py # 文档加载与分块
 │   ├── rag_pipeline.py       # RAG 流程（检索 + 生成）
 │   ├── ingest_swebench.py    # SWE-bench 知识库导入
+│   ├── compare_experiments.py # 四组交叉实验（旧版，已合并至 eval/compare_validate.py）
 │   └── README.md             # RAG 模块说明
 ├── scripts/          # 数据工程脚本
 │   └── split_wl_customer_support.py  # W-L 客服数据伪时间分割
