@@ -1,4 +1,4 @@
-"""测试 eval/eval_report.py 的 HTML 报告生成逻辑"""
+"""测试 eval/eval_report.py 的 HTML 报告生成逻辑（新版 + 旧版兼容）"""
 import sys
 from pathlib import Path
 
@@ -11,173 +11,220 @@ from eval_report import (
     _build_metrics_table,
     _build_sample_comparisons,
     _build_chart_script,
-    _calc_change,
+    _detect_format,
+    _flatten_groups,
     create_html_report,
     HTML_TEMPLATE,
 )
 
 
-class TestCalcChange:
-    """测试变化百分比计算"""
+# ---------------------------------------------------------------------------
+# Format detection & normalisation
+# ---------------------------------------------------------------------------
 
-    def test_improvement(self):
-        assert _calc_change(0.5, 0.6) == "+20.0%"
+class TestDetectFormat:
+    def test_compare_validate_format(self):
+        data = {"results": {"base": {}, "finetuned": {}}}
+        assert _detect_format(data) == "compare_validate"
 
-    def test_decline(self):
-        assert _calc_change(0.6, 0.5) == "-16.7%"
+    def test_evaluate_format(self):
+        data = {"base_model": {}, "finetuned_model": {}}
+        assert _detect_format(data) == "evaluate"
 
-    def test_reverse_mode(self):
-        """PPL 下降是好事，所以反向计算"""
-        change = _calc_change(100, 80, reverse=True)
-        # PPL 从 100 降到 80, 变化是 -20%, 反向后是 +20%
-        assert "+" in change
 
-    def test_zero_base(self):
-        assert _calc_change(0.0, 0.5) == "N/A"
+class TestFlattenGroups:
+    """分组归一化"""
 
+    def test_compare_validate_groups(self):
+        data = {
+            "results": {
+                "base": {
+                    "model_path": "Qwen/Qwen3-1.7B",
+                    "metrics": {
+                        "no_rag": {"rouge1_f": 0.26},
+                        "rag": {"rouge1_f": 0.39},
+                    },
+                    "samples": [
+                        {"question": "Q1", "reference": "R1", "no_rag": "P1_no", "rag": "P1_rag"},
+                    ],
+                },
+                "finetuned": {
+                    "model_path": "outputs/merged_model",
+                    "metrics": {
+                        "no_rag": {"rouge1_f": 0.43},
+                        "rag": {"rouge1_f": 0.48},
+                    },
+                    "samples": [
+                        {"question": "Q1", "reference": "R1", "no_rag": "P1_ft_no", "rag": "P1_ft_rag"},
+                    ],
+                },
+            },
+        }
+        groups = _flatten_groups(data)
+        assert len(groups) == 4
+        keys = [g["key"] for g in groups]
+        assert "base:no_rag" in keys
+        assert "base:rag" in keys
+        assert "finetuned:no_rag" in keys
+        assert "finetuned:rag" in keys
+
+    def test_legacy_evaluate_groups(self):
+        data = {
+            "base_model": {"rouge1": 0.4, "rougeL": 0.35, "per_sample": []},
+            "finetuned_model": {"rouge1": 0.5, "rougeL": 0.48, "per_sample": []},
+        }
+        groups = _flatten_groups(data)
+        assert len(groups) == 2
+        assert groups[0]["key"] == "base"
+        assert groups[1]["key"] == "finetuned"
+
+
+# ---------------------------------------------------------------------------
+# _build_summary
+# ---------------------------------------------------------------------------
 
 class TestBuildSummary:
-    """测试摘要卡片构建"""
+    def test_new_format(self):
+        groups = [
+            {"key": "base:no_rag", "label": "Base (no RAG)",
+             "metrics": {"rougeL_f": 0.16}, "samples": [{}] * 5},
+            {"key": "finetuned:no_rag", "label": "FT (no RAG)",
+             "metrics": {"rougeL_f": 0.30, "bertscore_f1": 0.62}, "samples": [{}] * 5},
+        ]
+        html = _build_summary(groups)
+        assert "ROUGE-L Delta" in html
+        assert "BERTScore F1" in html
+        assert "Groups" in html
 
-    def test_build_summary(self):
-        base = {
-            "perplexity": 100.0,
-            "rougeL": 0.3,
-            "tokens_per_sec": 50.0,
-            "per_sample": [{}] * 5,
-        }
-        finetuned = {
-            "perplexity": 80.0,
-            "rougeL": 0.45,
-            "tokens_per_sec": 48.0,
-            "per_sample": [{}] * 5,
-        }
-        items = _build_summary(base, finetuned)
 
-        assert len(items) == 4
-        # PPL 下降是改善
-        ppi = items[0]
-        assert "PPL" in ppi["label"]
-
-    def test_build_summary_zero_perplexity(self):
-        base = {"perplexity": 0, "rougeL": 0, "tokens_per_sec": 0, "per_sample": []}
-        finetuned = {"perplexity": 0, "rougeL": 0, "tokens_per_sec": 0, "per_sample": []}
-        items = _build_summary(base, finetuned)
-
-        # 全零时不应崩溃
-        for item in items:
-            assert "value" in item
-            assert "label" in item
-
+# ---------------------------------------------------------------------------
+# _build_metrics_table
+# ---------------------------------------------------------------------------
 
 class TestBuildMetricsTable:
-    """测试指标表格构建"""
-
-    def test_table_contains_all_metrics(self):
-        base = {
-            "perplexity": 100, "rouge1": 0.4, "rouge2": 0.2, "rougeL": 0.35,
-            "bleu4": 0.15, "keyword_accuracy": 0.5, "overlap_accuracy": 0.6,
-            "avg_length": 80, "avg_tokens": 20, "tokens_per_sec": 45,
-        }
-        finetuned = {
-            "perplexity": 80, "rouge1": 0.5, "rouge2": 0.3, "rougeL": 0.48,
-            "bleu4": 0.25, "keyword_accuracy": 0.7, "overlap_accuracy": 0.75,
-            "avg_length": 100, "avg_tokens": 25, "tokens_per_sec": 44,
-        }
-        html = _build_metrics_table(base, finetuned)
-
+    def test_new_format_table(self):
+        groups = [
+            {"key": "base:no_rag", "label": "Base (no RAG)",
+             "metrics": {"rouge1_f": 0.264, "rougeL_f": 0.163, "bleu4": 0.023, "bertscore_f1": 0.45}},
+            {"key": "finetuned:no_rag", "label": "FT (no RAG)",
+             "metrics": {"rouge1_f": 0.429, "rougeL_f": 0.300, "bleu4": 0.105, "bertscore_f1": 0.60}},
+        ]
+        html = _build_metrics_table(groups)
         assert "<table>" in html
-        assert "Perplexity" in html
-        assert "ROUGE-1" in html
-        assert "ROUGE-L" in html
+        assert "ROUGE-1 F1" in html
         assert "BLEU-4" in html
-        assert "推理速度" in html
+        assert "BERTScore F1" in html
+        # Change column (2 groups only)
+        assert "Change" in html
 
+
+# ---------------------------------------------------------------------------
+# _build_sample_comparisons
+# ---------------------------------------------------------------------------
 
 class TestBuildSampleComparisons:
-    """测试案例对比构建"""
-
-    def test_build_comparisons(self):
-        base_samples = [
-            {"question": "Q1", "reference": "R1", "prediction": "Base猜的"},
-            {"question": "Q2", "reference": "R2", "prediction": "Base猜的2"},
+    def test_new_format_samples(self):
+        groups = [
+            {"key": "base:no_rag", "label": "Base (no RAG)",
+             "metrics": {}, "samples": [
+                 {"question": "Q1", "reference": "R1", "prediction": "Base answer"},
+             ]},
+            {"key": "finetuned:no_rag", "label": "FT (no RAG)",
+             "metrics": {}, "samples": [
+                 {"question": "Q1", "reference": "R1", "prediction": "FT answer"},
+             ]},
         ]
-        ft_samples = [
-            {"question": "Q1", "reference": "R1", "prediction": "FT猜的"},
-            {"question": "Q2", "reference": "R2", "prediction": "FT猜的2"},
-        ]
-        html = _build_sample_comparisons(base_samples, ft_samples)
-
+        html = _build_sample_comparisons(groups)
         assert "Q1" in html
-        assert "Base猜的" in html
-        assert "FT猜的" in html
+        assert "Base answer" in html
+        assert "FT answer" in html
 
-    def test_unequal_samples(self):
-        """不相等长度的样本列表"""
-        base_samples = [{"question": "Q1", "reference": "R1", "prediction": "P1"}]
-        ft_samples = []
-        html = _build_sample_comparisons(base_samples, ft_samples)
-        # 不应崩溃
-        assert len(html) > 0
 
+# ---------------------------------------------------------------------------
+# _build_chart_script
+# ---------------------------------------------------------------------------
 
 class TestBuildChartScript:
-    """测试图表脚本构建"""
-
     def test_valid_javascript(self):
-        base = {"rouge1": 0.4, "rouge2": 0.2, "rougeL": 0.35, "bleu4": 0.15,
-                "keyword_accuracy": 0.5, "overlap_accuracy": 0.6}
-        finetuned = {"rouge1": 0.5, "rouge2": 0.3, "rougeL": 0.48, "bleu4": 0.25,
-                     "keyword_accuracy": 0.7, "overlap_accuracy": 0.75}
-
-        script = _build_chart_script(base, finetuned)
-
+        groups = [
+            {"key": "base:no_rag", "label": "Base (no RAG)",
+             "metrics": {"rouge1_f": 0.26, "rougeL_f": 0.16, "bleu4": 0.02, "bertscore_f1": 0.45}},
+            {"key": "finetuned:no_rag", "label": "FT (no RAG)",
+             "metrics": {"rouge1_f": 0.43, "rougeL_f": 0.30, "bleu4": 0.10, "bertscore_f1": 0.60}},
+        ]
+        script = _build_chart_script(groups)
         assert "Plotly.newPlot" in script
-        assert "trace1" in script
-        assert "trace2" in script
+        assert "Base (no RAG)" in script
+        assert "FT (no RAG)" in script
 
+
+# ---------------------------------------------------------------------------
+# create_html_report
+# ---------------------------------------------------------------------------
 
 class TestCreateHTMLReport:
-    """测试完整 HTML 报告生成"""
-
-    def test_generate_report(self, temp_dir):
-        results = {
-            "base_model": {
-                "perplexity": 100.0,
-                "rouge1": 0.4, "rouge2": 0.2, "rougeL": 0.35,
-                "bleu4": 0.15, "keyword_accuracy": 0.5, "overlap_accuracy": 0.6,
-                "avg_length": 80, "avg_tokens": 20, "tokens_per_sec": 45.0,
-                "per_sample": [
-                    {"question": "Q1", "reference": "R1", "prediction": "P1"},
-                ],
-            },
-            "finetuned_model": {
-                "perplexity": 80.0,
-                "rouge1": 0.5, "rouge2": 0.3, "rougeL": 0.48,
-                "bleu4": 0.25, "keyword_accuracy": 0.7, "overlap_accuracy": 0.75,
-                "avg_length": 100, "avg_tokens": 25, "tokens_per_sec": 44.0,
-                "per_sample": [
-                    {"question": "Q1", "reference": "R1", "prediction": "P1_ft"},
-                ],
+    def test_generate_new_format_report(self, temp_dir):
+        data = {
+            "results": {
+                "base": {
+                    "model_path": "Qwen/Qwen3-1.7B",
+                    "metrics": {
+                        "no_rag": {"rouge1_f": 0.26, "rouge2_f": 0.07, "rougeL_f": 0.16,
+                                   "bleu4": 0.02, "bertscore_f1": 0.43, "avg_length": 800.0,
+                                   "avg_tokens": 160.0, "tokens_per_sec": 81.0},
+                    },
+                    "samples": [
+                        {"question": "Q1", "reference": "R1", "no_rag": "P1_base"},
+                    ],
+                },
+                "finetuned": {
+                    "model_path": "outputs/merged",
+                    "metrics": {
+                        "no_rag": {"rouge1_f": 0.43, "rouge2_f": 0.19, "rougeL_f": 0.30,
+                                   "bleu4": 0.10, "bertscore_f1": 0.62, "avg_length": 376.0,
+                                   "avg_tokens": 99.0, "tokens_per_sec": 58.0},
+                    },
+                    "samples": [
+                        {"question": "Q1", "reference": "R1", "no_rag": "P1_ft"},
+                    ],
+                },
             },
         }
-
-        output_path = temp_dir / "report.html"
-        create_html_report(results, output_path)
+        output_path = temp_dir / "report_new.html"
+        create_html_report(data, output_path)
 
         assert output_path.exists()
         content = output_path.read_text(encoding="utf-8")
-
-        # 验证 HTML 结构
         assert "<!DOCTYPE html>" in content
         assert "Plotly.newPlot" in content
         assert "Q1" in content
-        assert "Base Model" in content
-        assert "Fine-tuned" in content
+        assert "Base (no RAG)" in content
+        assert "FT (no RAG)" in content
+
+    def test_generate_legacy_format_report(self, temp_dir):
+        """Backward-compatible with old evaluate.py output"""
+        data = {
+            "base_model": {
+                "rouge1": 0.4, "rouge2": 0.2, "rougeL": 0.35,
+                "bleu4": 0.15, "avg_length": 80, "avg_tokens": 20, "tokens_per_sec": 45.0,
+                "per_sample": [{"question": "Q1", "reference": "R1", "prediction": "P1"}],
+            },
+            "finetuned_model": {
+                "rouge1": 0.5, "rouge2": 0.3, "rougeL": 0.48,
+                "bleu4": 0.25, "avg_length": 100, "avg_tokens": 25, "tokens_per_sec": 44.0,
+                "per_sample": [{"question": "Q1", "reference": "R1", "prediction": "P1_ft"}],
+            },
+        }
+        output_path = temp_dir / "report_legacy.html"
+        create_html_report(data, output_path)
+
+        assert output_path.exists()
+        content = output_path.read_text(encoding="utf-8")
+        assert "<!DOCTYPE html>" in content
+        assert "Plotly.newPlot" in content
+        assert "Q1" in content
 
     def test_html_template_formatting(self):
-        """确保 HTML 模板格式化不会出错"""
-        # 模板中的 {{ }} 是转义的花括号，测试 format 调用不抛异常
         try:
             HTML_TEMPLATE.format(
                 summary_cards="test",
@@ -186,4 +233,4 @@ class TestCreateHTMLReport:
                 chart_script="test",
             )
         except Exception:
-            pytest.fail("HTML_TEMPLATE.format 抛出异常")
+            pytest.fail("HTML_TEMPLATE.format raised exception")

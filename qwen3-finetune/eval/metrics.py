@@ -91,14 +91,9 @@ def compute_rouge(
     references: List[str],
 ) -> Dict[str, float]:
     """
-    计算 ROUGE-1, ROUGE-2, ROUGE-L
+    计算 ROUGE-1/2/L 的 Precision, Recall, F1
 
-    参数:
-        predictions: 生成的文本列表
-        references: 参考文本列表
-
-    返回:
-        {"rouge1": float, "rouge2": float, "rougeL": float}
+    返回: 含 P/R/F1 三元组，同时保留 rouge1/rouge2/rougeL 作为 F1 别名（向下兼容）
     """
     if len(predictions) != len(references):
         raise ValueError(
@@ -110,18 +105,26 @@ def compute_rouge(
         use_stemmer=False,
     )
 
-    scores = {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
-    count = len(predictions)
+    accum = {}
+    for key in ["rouge1", "rouge2", "rougeL"]:
+        for suffix in ["_p", "_r", "_f"]:
+            accum[key + suffix] = 0.0
 
+    count = len(predictions)
     for pred, ref in zip(predictions, references):
         result = scorer.score(ref, pred)
-        scores["rouge1"] += result["rouge1"].fmeasure
-        scores["rouge2"] += result["rouge2"].fmeasure
-        scores["rougeL"] += result["rougeL"].fmeasure
+        for key in ["rouge1", "rouge2", "rougeL"]:
+            accum[key + "_p"] += result[key].precision
+            accum[key + "_r"] += result[key].recall
+            accum[key + "_f"] += result[key].fmeasure
 
-    # 取平均值
-    for key in scores:
-        scores[key] = round(scores[key] / max(count, 1), 4)
+    scores = {}
+    for key in ["rouge1", "rouge2", "rougeL"]:
+        scores[key + "_p"] = round(accum[key + "_p"] / max(count, 1), 4)
+        scores[key + "_r"] = round(accum[key + "_r"] / max(count, 1), 4)
+        scores[key + "_f"] = round(accum[key + "_f"] / max(count, 1), 4)
+        # 向下兼容：rouge1/rouge2/rougeL 等价于 F1
+        scores[key] = scores[key + "_f"]
 
     return scores
 
@@ -190,6 +193,91 @@ def compute_bleu(
         count += 1
 
     return round(total_score / max(count, 1), 4)
+
+
+# =============================================================================
+# BERTScore
+# =============================================================================
+
+_bertscore_model = None
+_bertscore_tokenizer = None
+
+
+def _get_bertscore_model():
+    global _bertscore_model, _bertscore_tokenizer
+    if _bertscore_model is None:
+        from transformers import AutoModel, AutoTokenizer
+
+        _bertscore_tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
+        _bertscore_model = AutoModel.from_pretrained("bert-base-chinese")
+        _bertscore_model.eval()
+        # BERTScore 在 CPU 上计算，不与 LLM 争抢 GPU
+    return _bertscore_model, _bertscore_tokenizer
+
+
+def compute_bertscore(
+    predictions: List[str],
+    references: List[str],
+    batch_size: int = 16,
+) -> Dict[str, float]:
+    """
+    计算 BERTScore F1（基于 bert-base-chinese）
+
+    返回: {"bertscore_f1": float}
+    """
+    import torch
+
+    model, tokenizer = _get_bertscore_model()
+    # 始终 CPU，避免 GPU OOM（8GB 显存已被 LLM 占用）
+    device = torch.device("cpu")
+    model = model.to(device)
+
+    all_precision = 0.0
+    all_recall = 0.0
+    count = 0
+
+    for start in range(0, len(predictions), batch_size):
+        batch_preds = predictions[start : start + batch_size]
+        batch_refs = references[start : start + batch_size]
+
+        for pred, ref in zip(batch_preds, batch_refs):
+            if not pred.strip() or not ref.strip():
+                all_precision += 0.0
+                all_recall += 0.0
+                count += 1
+                continue
+
+            pred_ids = tokenizer(pred, return_tensors="pt", truncation=True, max_length=128).to(device)
+            ref_ids = tokenizer(ref, return_tensors="pt", truncation=True, max_length=128).to(device)
+
+            with torch.no_grad():
+                pred_emb = model(**pred_ids).last_hidden_state[0]  # (L1, D)
+                ref_emb = model(**ref_ids).last_hidden_state[0]    # (L2, D)
+
+            # Normalize
+            pred_emb = pred_emb / (pred_emb.norm(dim=-1, keepdim=True) + 1e-12)
+            ref_emb = ref_emb / (ref_emb.norm(dim=-1, keepdim=True) + 1e-12)
+
+            # Cosine similarity matrix
+            sim = torch.matmul(pred_emb, ref_emb.T)  # (L1, L2)
+
+            # Precision: for each pred token, max sim to any ref token
+            precision = sim.max(dim=-1).values.mean().item()
+            # Recall: for each ref token, max sim to any pred token
+            recall = sim.max(dim=0).values.mean().item()
+
+            all_precision += max(precision, 0.0)
+            all_recall += max(recall, 0.0)
+            count += 1
+
+    if count == 0:
+        return {"bertscore_f1": 0.0}
+
+    avg_precision = all_precision / count
+    avg_recall = all_recall / count
+    f1 = 2 * avg_precision * avg_recall / max(avg_precision + avg_recall, 1e-12)
+
+    return {"bertscore_f1": round(f1, 4)}
 
 
 # =============================================================================

@@ -7,6 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "eval"))
 
 from metrics import (
+    compute_bertscore,
     compute_bleu,
     compute_rouge,
     compute_domain_accuracy,
@@ -132,6 +133,56 @@ class TestDomainAccuracy:
     def test_empty_input(self):
         result = compute_domain_accuracy([], [])
         assert result["overlap_accuracy"] == 0.0
+
+
+class TestRougePRF1:
+    """测试 ROUGE P/R/F1 三元组输出"""
+
+    def test_keys_present(self):
+        scores = compute_rouge(["hello world"], ["hello world"])
+        for key in ["rouge1_p", "rouge1_r", "rouge1_f",
+                     "rouge2_p", "rouge2_r", "rouge2_f",
+                     "rougeL_p", "rougeL_r", "rougeL_f"]:
+            assert key in scores, f"Missing key: {key}"
+            assert 0.0 <= scores[key] <= 1.0
+
+    def test_legacy_keys_preserved(self):
+        scores = compute_rouge(["hello world"], ["hello world"])
+        for key in ["rouge1", "rouge2", "rougeL"]:
+            assert key in scores
+            # Legacy alias should equal F1
+            assert scores[key] == scores[key + "_f"]
+
+    def test_perfect_match_p1_r1(self):
+        scores = compute_rouge(["a b c d"], ["a b c d"])
+        assert scores["rouge1_p"] > 0.9
+        assert scores["rouge1_r"] > 0.9
+
+
+class TestBERTScore:
+    """测试 BERTScore 计算"""
+
+    def test_perfect_match(self):
+        preds = ["机器学习是人工智能的分支"]
+        refs = ["机器学习是人工智能的分支"]
+        scores = compute_bertscore(preds, refs)
+        assert "bertscore_f1" in scores
+        assert scores["bertscore_f1"] > 0.8  # Near-perfect semantic match
+
+    def test_low_semantic_overlap(self):
+        preds = ["我喜欢在晴天去公园散步"]
+        refs = ["机器学习是人工智能的重要分支"]
+        scores = compute_bertscore(preds, refs)
+        # BERTScore 对中文短句有结构性基础分，不相关主题应 < 0.65
+        assert 0.0 <= scores["bertscore_f1"] <= 0.65
+
+    def test_empty_input(self):
+        scores = compute_bertscore([], [])
+        assert scores["bertscore_f1"] == 0.0
+
+    def test_empty_strings(self):
+        scores = compute_bertscore([""], [""])
+        assert scores["bertscore_f1"] == 0.0
 
 
 class TestGenerationStats:

@@ -25,7 +25,7 @@ RAG_DIR = PROJECT_DIR / "rag"
 sys.path.insert(0, str(THIS_DIR))
 sys.path.insert(0, str(RAG_DIR))
 
-from metrics import compute_bleu, compute_generation_stats, compute_rouge  # noqa: E402
+from metrics import compute_bertscore, compute_bleu, compute_generation_stats, compute_rouge  # noqa: E402
 
 
 logging.basicConfig(
@@ -130,6 +130,9 @@ def load_model(model_path: str, load_in_4bit: bool = True):
         kwargs["torch_dtype"] = torch.float16
 
     model = AutoModelForCausalLM.from_pretrained(model_path, **kwargs)
+    if hasattr(model, "generation_config") and hasattr(model.generation_config, "top_k"):
+        model.generation_config.top_k = None
+    model.config.tie_word_embeddings = False
     model.eval()
     return model, tokenizer
 
@@ -221,10 +224,12 @@ def rag_messages(question: str, retriever, top_k: int) -> List[dict]:
 def compute_group_metrics(predictions: List[str], references: List[str], times: List[float], tokens: List[int]):
     rouge = compute_rouge(predictions, references)
     bleu = compute_bleu(predictions, references)
+    bertscore = compute_bertscore(predictions, references)
     stats = compute_generation_stats(predictions, times, tokens)
     return {
         **rouge,
         "bleu4": bleu,
+        **bertscore,
         **stats,
     }
 
@@ -310,19 +315,40 @@ def evaluate_model(
 
 
 def print_metrics_table(results: Dict[str, dict]) -> None:
-    metric_names = ["rouge1", "rouge2", "rougeL", "bleu4", "avg_length", "avg_tokens", "tokens_per_sec"]
-    print("\n" + "=" * 100)
-    print("Comparison Metrics")
-    print("=" * 100)
+    metric_names = ["rouge1_f", "rouge2_f", "rougeL_f", "bleu4", "bertscore_f1", "avg_length", "tokens_per_sec"]
+    header_map = {
+        "rouge1_f": "ROUGE-1(F1)", "rouge2_f": "ROUGE-2(F1)", "rougeL_f": "ROUGE-L(F1)",
+        "bleu4": "BLEU-4", "bertscore_f1": "BERTScore", "avg_length": "AvgLen(chars)",
+        "tokens_per_sec": "Tok/s",
+    }
+    print("\n" + "=" * 120)
+    print("Comparison Metrics (F1 scores)")
+    print("=" * 120)
     header = ["group"] + metric_names
-    print(" | ".join(f"{h:<14}" for h in header))
-    print("-" * 100)
+    print(" | ".join(f"{header_map.get(h, h):<14}" for h in header))
+    print("-" * 120)
     for label, result in results.items():
         for mode, metrics in result["metrics"].items():
             group = f"{label}:{mode}"
             values = [group] + [metrics.get(name, 0) for name in metric_names]
             print(" | ".join(f"{str(v):<14}" for v in values))
-    print("=" * 100 + "\n")
+    print("=" * 120)
+
+    # ROUGE P/R
+    print("\nROUGE Precision / Recall")
+    print("-" * 80)
+    pr_header = ["group"] + [f"{t}_{m}" for t in ["rouge1", "rouge2", "rougeL"] for m in ["P", "R"]]
+    print(" | ".join(f"{h:<12}" for h in pr_header))
+    print("-" * 80)
+    for label, result in results.items():
+        for mode, metrics in result["metrics"].items():
+            group = f"{label}:{mode}"
+            vals = [group]
+            for t in ["rouge1", "rouge2", "rougeL"]:
+                vals.append(metrics.get(f"{t}_p", 0))
+                vals.append(metrics.get(f"{t}_r", 0))
+            print(" | ".join(f"{str(v):<12}" for v in vals))
+    print("-" * 80 + "\n")
 
 
 def parse_args():
@@ -334,12 +360,37 @@ def parse_args():
     parser.add_argument("--retriever", choices=["none", "bm25", "chromadb"], default="none")
     parser.add_argument("--retriever_path", type=str, default="bm25_index_swebench")
     parser.add_argument("--retriever_collection", type=str, default="swebench_instances")
-    parser.add_argument("--top_k", type=int, default=2)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=2,
+        help="Retrieved documents per question; 2 keeps most RAG prompts near the 512-token training length.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=4,
+        help="Generation batch size tuned for Qwen3-1.7B on an 8 GB GPU.",
+    )
     parser.add_argument("--modes", choices=["no_rag", "rag", "both"], default="both")
-    parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--max_new_tokens", type=int, default=160)
-    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=300,
+        help="Maximum evaluation rows; 300 gives a practical runtime and a more stable estimate than 200.",
+    )
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=160,
+        help="Output-token cap covering 99.51%% of reference answers in rag_eval.jsonl.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Use deterministic greedy decoding by default for reproducible metrics.",
+    )
     parser.add_argument("--no_4bit", action="store_true")
     return parser.parse_args()
 
@@ -414,6 +465,12 @@ def main():
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print_metrics_table(results)
     logger.info("Saved report: %s", output)
+
+    html_path = output.parent / output.name.replace(".json", ".html")
+    from eval_report import create_html_report
+
+    create_html_report(report, html_path)
+    logger.info("Saved HTML report: %s", html_path)
 
 
 if __name__ == "__main__":

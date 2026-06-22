@@ -1,16 +1,12 @@
 """
-评估报告生成模块
+Generate interactive HTML comparison reports from eval JSON output.
 
-生成包含以下内容的 HTML 报告：
-- 指标对比柱状图（base vs finetuned）
-- 逐条案例对比
-- 指标变化百分比汇总表
-- 使用 plotly 生成交互式图表
+Supports both legacy format (evaluate.py) and current format (compare_validate.py).
 """
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,7 +20,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Qwen3-1.7B QLoRA 微调评估报告</title>
+    <title>Qwen3-1.7B QLoRA Fine-tuning Evaluation Report</title>
     <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -35,42 +31,42 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .card {{ background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); padding: 20px; margin-bottom: 20px; }}
         .chart-container {{ width: 100%; min-height: 450px; }}
         table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
-        th, td {{ padding: 10px 15px; text-align: left; border-bottom: 1px solid #eee; }}
-        th {{ background: #0f3460; color: white; font-weight: 600; }}
+        th, td {{ padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 0.92em; }}
+        th {{ background: #0f3460; color: white; font-weight: 600; white-space: nowrap; }}
         tr:hover {{ background: #f8f9fa; }}
         .improvement {{ color: #00b894; font-weight: bold; }}
         .decline {{ color: #e17055; font-weight: bold; }}
         .neutral {{ color: #636e72; }}
         .sample-block {{ margin: 15px 0; padding: 12px; background: #f8f9fa; border-radius: 6px; border-left: 4px solid #0f3460; }}
         .sample-block .question {{ font-weight: bold; color: #0f3460; margin-bottom: 8px; }}
-        .sample-block .label {{ font-size: 0.85em; color: #888; margin-bottom: 2px; }}
-        .sample-block .content {{ white-space: pre-wrap; background: white; padding: 10px; border-radius: 4px; margin-bottom: 10px; border: 1px solid #e0e0e0; }}
-        .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 15px 0; }}
+        .sample-block .label {{ font-size: 0.82em; color: #888; margin-bottom: 2px; }}
+        .sample-block .content {{ white-space: pre-wrap; background: white; padding: 10px; border-radius: 4px; margin-bottom: 10px; border: 1px solid #e0e0e0; font-size: 0.9em; max-height: 200px; overflow-y: auto; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 15px 0; }}
         .summary-item {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 8px; text-align: center; }}
-        .summary-item .value {{ font-size: 2em; font-weight: bold; }}
-        .summary-item .label {{ font-size: 0.85em; opacity: 0.9; }}
+        .summary-item .value {{ font-size: 1.6em; font-weight: bold; }}
+        .summary-item .label {{ font-size: 0.82em; opacity: 0.9; }}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Qwen3-1.7B QLoRA 微调评估报告</h1>
+        <h1>Qwen3-1.7B QLoRA Fine-tuning Evaluation Report</h1>
 
         <div class="summary-grid">
             {summary_cards}
         </div>
 
         <div class="card">
-            <h2>指标对比</h2>
+            <h2>Metrics Comparison</h2>
             <div id="metrics-chart" class="chart-container"></div>
         </div>
 
         <div class="card">
-            <h2>指标变化汇总</h2>
+            <h2>Metrics Table</h2>
             {metrics_table}
         </div>
 
         <div class="card">
-            <h2>逐条案例对比</h2>
+            <h2>Sample Comparisons</h2>
             {sample_comparisons}
         </div>
     </div>
@@ -81,37 +77,92 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+GROUP_COLORS = {
+    "base:no_rag": "#95a5a6",
+    "base:rag": "#3498db",
+    "finetuned:no_rag": "#9b59b6",
+    "finetuned:rag": "#2ecc71",
+    "base": "#95a5a6",
+    "finetuned": "#9b59b6",
+}
 
-def create_html_report(results: Dict, output_path: Path) -> None:
+
+def _detect_format(data: dict) -> str:
+    """Return 'compare_validate' or 'evaluate' based on structure."""
+    if "results" in data:
+        return "compare_validate"
+    if "base_model" in data or "finetuned_model" in data:
+        return "evaluate"
+    return "compare_validate"
+
+
+def _flatten_groups(data: dict) -> List[dict]:
     """
-    生成完整的 HTML 评估报告
-
-    参数:
-        results: evaluate.py 输出的结果字典，包含 base_model 和 finetuned_model
-        output_path: HTML 报告输出路径
+    Normalise both formats into a flat list of groups:
+    [{"key": "base:no_rag", "label": "Base (no RAG)", "metrics": {...}, "samples": [...]}, ...]
     """
-    base = results.get("base_model", {})
-    finetuned = results.get("finetuned_model", {})
+    fmt = _detect_format(data)
 
-    # 生成摘要卡片
-    summary_items = _build_summary(base, finetuned)
-    summary_html = "\n".join(
-        f'<div class="summary-item"><div class="value">{item["value"]}</div><div class="label">{item["label"]}</div></div>'
-        for item in summary_items
-    )
+    if fmt == "compare_validate":
+        results = data.get("results", {})
+        groups = []
+        for model_label in ["base", "finetuned"]:
+            model_data = results.get(model_label)
+            if not model_data:
+                continue
+            metrics = model_data.get("metrics", {})
+            samples = model_data.get("samples", [])
+            for mode in ["no_rag", "rag"]:
+                if mode not in metrics:
+                    continue
+                key = f"{model_label}:{mode}"
+                if model_label == "base" and mode == "no_rag":
+                    group_label = "Base (no RAG)"
+                elif model_label == "base" and mode == "rag":
+                    group_label = "Base + RAG"
+                elif model_label == "finetuned" and mode == "no_rag":
+                    group_label = "FT (no RAG)"
+                else:
+                    group_label = "FT + RAG"
+                groups.append({
+                    "key": key,
+                    "label": group_label,
+                    "metrics": metrics[mode],
+                    "samples": [
+                        {"question": s.get("question", ""),
+                         "reference": s.get("reference", ""),
+                         "prediction": s.get(mode, s.get("prediction", ""))}
+                        for s in samples
+                    ],
+                })
+        return groups
 
-    # 生成指标对比表
-    metrics_html = _build_metrics_table(base, finetuned)
+    # Legacy evaluate.py format
+    groups = []
+    for model_key, model_label in [("base_model", "Base"), ("finetuned_model", "Finetuned")]:
+        model_data = data.get(model_key, {})
+        if not model_data:
+            continue
+        groups.append({
+            "key": model_label.lower(),
+            "label": model_label,
+            "metrics": {k: v for k, v in model_data.items() if not isinstance(v, list)},
+            "samples": model_data.get("per_sample", []),
+        })
+    return groups
 
-    # 生成案例对比
-    base_samples = base.get("per_sample", [])
-    ft_samples = finetuned.get("per_sample", [])
-    samples_html = _build_sample_comparisons(base_samples, ft_samples)
 
-    # 生成图表脚本
-    chart_js = _build_chart_script(base, finetuned)
+def create_html_report(report_data: dict, output_path: Path) -> None:
+    groups = _flatten_groups(report_data)
+    if not groups:
+        logger.warning("No groups found in report data; skipping HTML.")
+        return
 
-    # 组装 HTML
+    summary_html = _build_summary(groups)
+    metrics_html = _build_metrics_table(groups)
+    samples_html = _build_sample_comparisons(groups)
+    chart_js = _build_chart_script(groups)
+
     html = HTML_TEMPLATE.format(
         summary_cards=summary_html,
         metrics_table=metrics_html,
@@ -120,180 +171,175 @@ def create_html_report(results: Dict, output_path: Path) -> None:
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html)
-
-    logger.info(f"HTML 报告已生成: {output_path}")
+    output_path.write_text(html, encoding="utf-8")
+    logger.info("HTML report saved: %s", output_path)
 
 
-def _build_summary(base: Dict, finetuned: Dict) -> List[Dict]:
-    """构建摘要卡片"""
-    ppl_change = _calc_change(base.get("perplexity", 0), finetuned.get("perplexity", 0), reverse=True)
-    rouge_change = _calc_change(base.get("rougeL", 0), finetuned.get("rougeL", 0))
-    speed_change = _calc_change(base.get("tokens_per_sec", 0), finetuned.get("tokens_per_sec", 0))
+def _build_summary(groups: List[dict]) -> str:
+    items = []
+    if len(groups) >= 2:
+        base_metrics = groups[0]["metrics"]
+        ft_metrics = groups[-1]["metrics"]  # Last group is usually the best finetuned
+        rl_key = next((k for k in ["rougeL_f", "rougeL"] if k in ft_metrics), None)
+        if rl_key:
+            delta = ft_metrics[rl_key] - base_metrics.get(rl_key, 0)
+            items.append({"label": "ROUGE-L Delta", "value": f"{delta:+.3f}"})
+        bs_key = next((k for k in ["bertscore_f1"] if k in ft_metrics), None)
+        if bs_key:
+            items.append({"label": "BERTScore F1 (best)", "value": f'{ft_metrics[bs_key]:.3f}'})
 
-    return [
-        {"label": "PPL 变化", "value": ppl_change},
-        {"label": "ROUGE-L 变化", "value": rouge_change},
-        {"label": "推理速度变化", "value": speed_change},
-        {"label": "总测试样本", "value": str(len(base.get("per_sample", [])))},
-    ]
+    items.append({"label": "Groups", "value": str(len(groups))})
+    items.append({"label": "Samples", "value": str(len(groups[0]["samples"]) if groups else 0)})
+
+    return "\n".join(
+        f'<div class="summary-item"><div class="value">{item["value"]}</div>'
+        f'<div class="label">{item["label"]}</div></div>'
+        for item in items
+    )
 
 
-def _calc_change(base_val: float, ft_val: float, reverse: bool = False) -> str:
-    """计算变化百分比"""
+def _pct_change(base_val: float, ft_val: float) -> str:
     if base_val == 0:
         return "N/A"
-    pct = (ft_val - base_val) / base_val * 100
-    if reverse:
-        pct = -pct
-    arrow = "+" if pct > 0 else ""
-    return f"{arrow}{pct:.1f}%"
+    return f"{((ft_val - base_val) / base_val * 100):+.1f}%"
 
 
-def _build_metrics_table(base: Dict, finetuned: Dict) -> str:
-    """构建指标对比表"""
-    metrics_list = [
-        ("Perplexity", "perplexity", "down"),
-        ("ROUGE-1", "rouge1", "up"),
-        ("ROUGE-2", "rouge2", "up"),
-        ("ROUGE-L", "rougeL", "up"),
-        ("BLEU-4", "bleu4", "up"),
-        ("关键词准确率", "keyword_accuracy", "up"),
-        ("内容重叠率", "overlap_accuracy", "up"),
-        ("平均生成长度", "avg_length", "neutral"),
-        ("平均Token数", "avg_tokens", "neutral"),
-        ("推理速度(tok/s)", "tokens_per_sec", "up"),
+def _build_metrics_table(groups: List[dict]) -> str:
+    # Collect all metric keys across all groups
+    metric_keys = []
+    seen = set()
+    for g in groups:
+        for k in g["metrics"]:
+            if k not in seen:
+                metric_keys.append(k)
+                seen.add(k)
+
+    # Sort: F1/P/R groups
+    priority_order = [
+        "rouge1_f", "rouge1_p", "rouge1_r", "rouge2_f", "rouge2_p", "rouge2_r",
+        "rougeL_f", "rougeL_p", "rougeL_r", "bleu4", "bertscore_f1",
+        "avg_length", "avg_tokens", "tokens_per_sec",
     ]
+    ordered = [k for k in priority_order if k in seen]
+    ordered += [k for k in metric_keys if k not in ordered]
+    # Legacy aliases
+    key_labels = {
+        "rouge1_f": "ROUGE-1 F1", "rouge1_p": "ROUGE-1 P", "rouge1_r": "ROUGE-1 R",
+        "rouge2_f": "ROUGE-2 F1", "rouge2_p": "ROUGE-2 P", "rouge2_r": "ROUGE-2 R",
+        "rougeL_f": "ROUGE-L F1", "rougeL_p": "ROUGE-L P", "rougeL_r": "ROUGE-L R",
+        "rouge1": "ROUGE-1", "rouge2": "ROUGE-2", "rougeL": "ROUGE-L",
+        "bleu4": "BLEU-4", "bertscore_f1": "BERTScore F1",
+        "overlap_accuracy": "Overlap Acc", "keyword_accuracy": "Keyword Acc",
+        "avg_length": "Avg Length", "avg_tokens": "Avg Tokens", "tokens_per_sec": "Tok/s",
+    }
+
+    header = "<tr><th>Metric</th>" + "".join(f"<th>{g['label']}</th>" for g in groups)
+    if len(groups) == 2:
+        header += "<th>Change</th>"
+    header += "</tr>"
 
     rows = []
-    for label, key, direction in metrics_list:
-        b_val = base.get(key, 0)
-        ft_val = finetuned.get(key, 0)
-        change = _calc_change(b_val, ft_val, reverse=(direction == "down"))
+    for key in ordered:
+        vals = [g["metrics"].get(key, "-") for g in groups]
+        label = key_labels.get(key, key)
+        row = f"<tr><td>{label}</td>"
+        for v in vals:
+            if isinstance(v, float):
+                row += f"<td>{v:.4f}</td>"
+            else:
+                row += f"<td>{v}</td>"
+        if len(groups) == 2 and isinstance(vals[0], (int, float)) and isinstance(vals[1], (int, float)):
+            if vals[0] == 0:
+                row += '<td class="neutral">N/A</td>'
+            else:
+                pct = (vals[1] - vals[0]) / vals[0] * 100
+                css = "improvement" if pct > 0 else "decline"
+                row += f'<td class="{css}">{pct:+.1f}%</td>'
+        rows.append(row + "</tr>")
 
-        css_class = "neutral"
-        if change != "N/A":
-            try:
-                val = float(change.replace("%", "").replace("+", ""))
-                if val > 2:
-                    css_class = "improvement"
-                elif val < -2:
-                    css_class = "decline"
-            except ValueError:
-                pass
-
-        rows.append(
-            f"<tr><td>{label}</td><td>{b_val}</td><td>{ft_val}</td>"
-            f"<td class='{css_class}'>{change}</td></tr>"
-        )
-
-    header = "<tr><th>指标</th><th>Base Model</th><th>Fine-tuned</th><th>变化</th></tr>"
     return f"<table>{header}{''.join(rows)}</table>"
 
 
-def _build_sample_comparisons(base_samples: List, ft_samples: List) -> str:
-    """构建案例对比 HTML"""
-    html_parts = []
-    max_n = max(len(base_samples), len(ft_samples))
-    max_show = min(10, max_n)
+def _build_sample_comparisons(groups: List[dict]) -> str:
+    if not groups or not groups[0].get("samples"):
+        return "<p>No sample-level data available.</p>"
 
+    samples_by_idx = groups[0]["samples"]
+    max_show = min(10, len(samples_by_idx))
+
+    parts = []
     for i in range(max_show):
-        bs = base_samples[i] if i < len(base_samples) else {}
-        fs = ft_samples[i] if i < len(ft_samples) else {}
+        q = samples_by_idx[i].get("question", "")
+        if len(q) > 150:
+            q = q[:150] + "..."
 
-        question = bs.get("question", fs.get("question", ""))
-        # 截断过长的问题
-        if len(question) > 200:
-            question = question[:200] + "..."
+        parts.append(f'<div class="sample-block"><div class="question">[{i + 1}] {q}</div>')
+        for g in groups:
+            s = g["samples"][i] if i < len(g["samples"]) else {}
+            pred = s.get("prediction", s.get(g["key"].split(":")[-1] if ":" in g["key"] else "prediction", ""))
+            parts.append(
+                f'<div class="label">{g["label"]}:</div>'
+                f'<div class="content">{pred[:400] if pred else "(empty)"}</div>'
+            )
+        parts.append("</div>")
 
-        html_parts.append(f"""
-        <div class="sample-block">
-            <div class="question">[{i + 1}] {question}</div>
-
-            <div class="label">参考答案:</div>
-            <div class="content">{bs.get("reference", "")[:300]}</div>
-
-            <div class="label">基座模型输出:</div>
-            <div class="content">{bs.get("prediction", "")[:300]}</div>
-
-            <div class="label">微调模型输出:</div>
-            <div class="content">{fs.get("prediction", "")[:300]}</div>
-        </div>
-        """)
-
-    return "\n".join(html_parts)
+    return "\n".join(parts)
 
 
-def _build_chart_script(base: Dict, finetuned: Dict) -> str:
-    """构建 Plotly 图表脚本"""
-    metrics = [
-        ("ROUGE-1", "rouge1"),
-        ("ROUGE-2", "rouge2"),
-        ("ROUGE-L", "rougeL"),
-        ("BLEU-4", "bleu4"),
-        ("关键词准确率", "keyword_accuracy"),
-        ("内容重叠率", "overlap_accuracy"),
-    ]
+def _build_chart_script(groups: List[dict]) -> str:
+    # Chart-worthy metrics: F1 scores only
+    chart_metrics = []
+    for k in ["rouge1_f", "rouge2_f", "rougeL_f", "bleu4", "bertscore_f1"]:
+        if any(k in g["metrics"] for g in groups):
+            chart_metrics.append(k)
+    if not chart_metrics:
+        # Fallback for legacy format
+        chart_metrics = ["rouge1", "rouge2", "rougeL", "bleu4"]
 
-    labels = [m[0] for m in metrics]
-    base_values = [base.get(m[1], 0) for m in metrics]
-    ft_values = [finetuned.get(m[1], 0) for m in metrics]
+    metric_labels = {
+        "rouge1_f": "ROUGE-1", "rouge2_f": "ROUGE-2", "rougeL_f": "ROUGE-L",
+        "rouge1": "ROUGE-1", "rouge2": "ROUGE-2", "rougeL": "ROUGE-L",
+        "bleu4": "BLEU-4", "bertscore_f1": "BERTScore",
+    }
+
+    traces = []
+    for g in groups:
+        traces.append({
+            "x": [metric_labels.get(k, k) for k in chart_metrics],
+            "y": [g["metrics"].get(k, 0) for k in chart_metrics],
+            "name": g["label"],
+            "type": "bar",
+            "marker": {"color": GROUP_COLORS.get(g["key"], "#636e72")},
+        })
 
     return f"""
-    var trace1 = {{
-        x: {json.dumps(labels)},
-        y: {json.dumps(base_values)},
-        name: 'Base Model',
-        type: 'bar',
-        marker: {{ color: '#636e72' }}
-    }};
-
-    var trace2 = {{
-        x: {json.dumps(labels)},
-        y: {json.dumps(ft_values)},
-        name: 'Fine-tuned',
-        type: 'bar',
-        marker: {{ color: '#0f3460' }}
-    }};
-
+    var data = {json.dumps(traces)};
     var layout = {{
         barmode: 'group',
         margin: {{ t: 20, r: 20, l: 50, b: 80 }},
         yaxis: {{ title: 'Score', range: [0, 1] }},
-        legend: {{ orientation: 'h', y: 1.1 }},
+        legend: {{ orientation: 'h', y: 1.15 }},
     }};
-
-    Plotly.newPlot('metrics-chart', [trace1, trace2], layout, {{ responsive: true }});
+    Plotly.newPlot('metrics-chart', data, layout, {{ responsive: true }});
     """
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="生成评估报告")
-    parser.add_argument(
-        "--results",
-        type=str,
-        required=True,
-        help="评估结果 JSON 文件路径（evaluate.py 输出）",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="eval_outputs/eval_report.html",
-        help="HTML 报告输出路径",
-    )
+    parser = argparse.ArgumentParser(description="Generate evaluation HTML report")
+    parser.add_argument("--results", type=str, required=True, help="Path to eval JSON file")
+    parser.add_argument("--output", type=str, default=None, help="HTML output path (default: same dir, .html)")
 
     args = parser.parse_args()
-
     results_path = Path(args.results)
     if not results_path.exists():
-        logger.error(f"结果文件不存在: {results_path}")
+        logger.error("Results file not found: %s", results_path)
         exit(1)
 
     with open(results_path, "r", encoding="utf-8") as f:
-        results = json.load(f)
+        data = json.load(f)
 
-    create_html_report(results, Path(args.output))
-    logger.info(f"报告已生成: {args.output}")
+    output = Path(args.output) if args.output else results_path.with_suffix(".html")
+    create_html_report(data, output)
+    logger.info("Done: %s", output)
