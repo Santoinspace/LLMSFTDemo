@@ -118,6 +118,7 @@ def build_training_arguments(
     return SFTConfig(
         output_dir=str(output_dir),
         num_train_epochs=train_cfg["num_epochs"],
+        max_steps=train_cfg.get("max_steps", -1),
         per_device_train_batch_size=train_cfg["batch_size"],
         gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
         learning_rate=train_cfg["learning_rate"],

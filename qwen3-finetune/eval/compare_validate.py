@@ -55,15 +55,14 @@ def first_content(messages: List[dict], role: str) -> str:
 def prompt_messages_from_case(case: dict) -> List[dict]:
     messages = case.get("messages")
     if isinstance(messages, list) and messages:
-        prompt = []
-        for message in messages:
-            role = message.get("role")
-            content = message.get("content", "")
-            if role == "system":
-                prompt.append({"role": "system", "content": content})
-            elif role == "user":
-                prompt.append({"role": "user", "content": content})
-                break
+        prompt = [
+            {"role": message.get("role"), "content": message.get("content", "")}
+            for message in messages
+            if message.get("role") in {"system", "user", "assistant"}
+            and str(message.get("content", "")).strip()
+        ]
+        if prompt and prompt[-1]["role"] == "assistant":
+            prompt.pop()
         if prompt and prompt[-1]["role"] == "user":
             return prompt
 
@@ -262,7 +261,15 @@ def evaluate_model(
         batch = cases[start : start + batch_size]
         logger.info("[%s] %s-%s/%s", label, start + 1, start + len(batch), len(cases))
         batch_samples = [
-            {"question": case["question"], "reference": case["reference"]}
+            {
+                **{
+                    key: case[key]
+                    for key in ("id", "category", "source_group", "source_dataset")
+                    if key in case
+                },
+                "question": case["question"],
+                "reference": case["reference"],
+            }
             for case in batch
         ]
 
@@ -307,11 +314,31 @@ def evaluate_model(
         for name, data in groups.items()
     }
 
+    metrics_by_category = {}
+    categories = sorted({case.get("category") for case in cases if case.get("category")})
+    for category in categories:
+        indices = [i for i, case in enumerate(cases) if case.get("category") == category]
+        category_references = [references[i] for i in indices]
+        metrics_by_category[category] = {
+            name: compute_group_metrics(
+                [data["predictions"][i] for i in indices],
+                category_references,
+                [data["times"][i] for i in indices],
+                [data["tokens"][i] for i in indices],
+            )
+            for name, data in groups.items()
+        }
+
     del model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return {"model_path": model_path, "metrics": metrics, "samples": samples}
+    return {
+        "model_path": model_path,
+        "metrics": metrics,
+        "metrics_by_category": metrics_by_category,
+        "samples": samples,
+    }
 
 
 def print_metrics_table(results: Dict[str, dict]) -> None:

@@ -32,11 +32,21 @@ python eval/compare_validate.py ^
   --retriever_collection wl_customer_support ^
   --modes both ^
   --batch_size 4 ^
-  --max_samples 300 ^
+  --max_samples 0 ^
   --max_new_tokens 160 ^
   --top_k 2 ^
   --temperature 0 ^
-  --output eval_outputs/wl_customer_support/compare_validate_300.json
+  --output eval_outputs/wl_customer_support/compare_validate_1415.json
+
+# 85%工单数据集，15%通用数据集，replay
+python train/train.py ^
+python train/resume_train.py ^
+    --qlora_config configs/qlora_qwen3-1.7b_wl-cs_r16_len512_ep3.yaml ^
+    --training_config configs/training_qwen3-1.7b_wl-cs.yaml ^
+    --train_data data/preprocessed/wl_customer_support_replay15/mixed_train.jsonl ^
+    --val_data data/wl_customer_support_split/sft_val.jsonl ^
+    --output_dir outputs/outputs_wl_customer_support_replay15
+
 
 # base + no_rag
 python rag/rag_pipeline.py ^

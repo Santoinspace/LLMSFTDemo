@@ -149,7 +149,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--base_model",
         type=str,
-        default="Qwen/Qwen3-1.7B-Instruct",
+        default="Qwen/Qwen3-1.7B",
         help="基础模型名称或路径",
     )
     parser.add_argument(
